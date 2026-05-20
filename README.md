@@ -89,27 +89,53 @@ asf-follow config/beethoven5.json `
 
 ## config.json スキーマ
 
-姉妹プロジェクトと同じ形式 + `built` フィールド。
+`config/` ディレクトリに JSON ファイルを置く。`asf-follow` の第1引数に渡す。
 
 ```json
 {
   "settings": {
     "cooldown_seconds": 3.0,
-    "silence_threshold_db": -55.0
+    "silence_threshold_db": -55.0,
+    "mic_device": null,
+    "oltw_search_width": 240,
+    "oltw_step_size": 1
   },
   "movements": [
     {
       "id": 1,
-      "xml_file": "beethoven5.xml",
-      "built_dir": "../data/built/beethoven5_karajan",
+      "xml_file": "../data/scores/piece.mxl",
+      "built_dir": "../data/built/piece_recording",
       "triggers": [
-        {"measure": 1, "action": "right", "note": "開始"},
+        {"measure": 1,  "action": "right", "note": "開始"},
         {"measure": 17, "action": "right", "note": "第二主題"}
       ]
     }
   ]
 }
 ```
+
+### settings フィールド
+
+| フィールド | デフォルト | 説明 |
+|---|---|---|
+| `cooldown_seconds` | `3.0` | トリガ発火後、次のトリガが有効になるまでの最短間隔（秒）。連打防止。 |
+| `silence_threshold_db` | `-55.0` | この dBFS 以下が続いたら OLTW を一時停止（フェルマータ・休符対策）。 |
+| `mic_device` | `null` | マイク入力デバイス名または番号。`null` = OS デフォルト。 |
+| `oltw_search_width` | `240` | OLTW の探索窓幅（フレーム数）。広いほどテンポ変化に強いがドリフトしやすい。 |
+| `oltw_step_size` | `1` | 1 ライブフレームあたりリファレンスを最大何フレーム進めるか。 |
+
+### movements フィールド
+
+| フィールド | 必須 | 説明 |
+|---|---|---|
+| `id` | ○ | 楽章番号（任意の整数。順序の識別用）。 |
+| `xml_file` | ○ | MusicXML / MXL ファイルのパス。config ファイルからの相対パス可。 |
+| `built_dir` | ○ | `asf-build` の出力ディレクトリ（`warping_path.npz` と `reference_cens.npy` を含む）。 |
+| `triggers` | ○ | スライド操作の定義リスト。`measure`（小節番号）と `action`（`"right"` / `"left"`）が必須。`note` は任意メモ。 |
+
+### 実際の例（幻想交響曲第4楽章）
+
+`config/fantastique4.json` を参照。178 小節、ベルリン・フィル録音をリファレンスとして使用。
 
 ## プロジェクト構成
 
