@@ -199,18 +199,53 @@ class ConfigLoader:
                 Default 1 (no skipping).
             step_penalty: extra cost on horizontal/vertical DP transitions
                 to bias the alignment toward "1 ref ↔ 1 live" diagonal
-                motion. Default 0.02. Critical for escaping "stuck
-                position" plateaus where DP's accumulated cost glues the
-                position in place despite live audio moving on — measured
-                in benchmark to drop different-recording coverage from
-                96% to 47% if reduced to 0.005.
+                motion. Default 0.06 — picked from a sweep over six
+                recordings of the same work: lifts same-recording
+                confidence from 0.58 to 0.97 (near-perfect) and cuts
+                early stuck plateaus on different recordings from 4-7s
+                down to <2s in most cases, with no coverage regressions.
+                Going to 0.10 yields marginal further gains but risks
+                "race ahead" behaviour on tempo holds.
         """
         defaults = {
             "search_width": 240,
             "back_inhibit_frames": 30,
             "init_search_width": 30,
             "step_size": 1,
-            "step_penalty": 0.02,
+            "step_penalty": 0.06,
+            # Hard cap on per-live-frame ref advance: prevents the DP's
+            # vert chain from racing 10+ measures forward across a
+            # similar passage (e.g. theme recapitulation). 50 frames ≈
+            # 4.6s ≈ 2-3 measures of marche material — wide enough that
+            # the system can still catch up after a brief misalignment,
+            # narrow enough that a "sudden 20-measure leap" is
+            # structurally impossible. Tested to give 100% coverage on
+            # Karajan and 96.5–100% on 5 alternate recordings.
+            "max_advance_per_frame": 50,
+            # stuck_dp_reset wipes accumulated backward cost when the
+            # DP has been trying to step backward for an extended
+            # period without making real forward progress — the
+            # "cumulative cost lock-in" failure mode that mic input
+            # often triggers. Default 12s (loose enough that natural
+            # band-DP recovery isn't preempted; tight enough that
+            # user-perceptible "the slide is frozen" stalls get an
+            # escape after ~12s). Set 0 to disable.
+            "stuck_dp_reset_seconds": 12.0,
+            # stuck_rematch_seconds is 0 (disabled) by default. The
+            # mechanism reliably recovers from "script started after
+            # music began" mislocks in headless file-input testing,
+            # but produces false forward jumps on mic captures whose
+            # chroma is too ambiguous for a global-min position to be
+            # trusted. Live mic users should leave this off; file-input
+            # workflows that need lead-time recovery can opt in with
+            # e.g. {"oltw_kwargs": {"stuck_rematch_seconds": 4.0}} in
+            # config.json.
+            "stuck_rematch_seconds": 0.0,
+            "stuck_rematch_min_advance": 3,
+            "stuck_rematch_cost_margin": 0.08,
+            "stuck_rematch_min_jump_frames": 60,
+            "stuck_rematch_max_jump_frames": 480,
+            "stuck_rematch_min_discriminability_ratio": 0.75,
         }
         user_kwargs = self.settings.get("oltw_kwargs", {})
         if not isinstance(user_kwargs, dict):

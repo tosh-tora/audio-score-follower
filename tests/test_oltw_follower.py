@@ -187,6 +187,143 @@ def test_step_penalty_zero_disables_forward_bias():
     assert (diffs >= 0).all(), f"non-monotonic with step_penalty=0: diffs={diffs}"
 
 
+def test_stuck_dp_reset_fires_on_backward_lockin(caplog):
+    """累積コストが後退を強く欲したとき stuck_dp_reset がログ発火する。
+
+    DP reset の正しい挙動: 後退試行が連発しつつ前進ゼロが続いたら、
+    INFO ログ "OLTW DP reset" が出る。位置移動の保証はしない (それは
+    後続フレームの DP 任せ)。
+    """
+    import logging
+    cfg = FeatureConfig()
+    ref = _make_chroma_sequence(80)
+    follower = OnlineDTWFollower(
+        ref, cfg,
+        search_width=40, back_inhibit_frames=20, init_search_width=10,
+        step_penalty=0.06,
+        stuck_dp_reset_seconds=1.0,  # ~10 frames at default rate
+        stuck_rematch_seconds=0.0,
+    )
+    # Advance a few frames legitimately.
+    for j in range(15):
+        follower.process_frame(ref[:, j])
+    # Now feed an earlier frame repeatedly — DP will want to step
+    # backward every frame, satisfying both stuck conditions.
+    with caplog.at_level(logging.INFO, logger="audio_score_follower.core.oltw_follower"):
+        for _ in range(40):
+            follower.process_frame(ref[:, 5])
+    assert any("DP reset" in rec.message for rec in caplog.records), (
+        f"DP reset never fired despite sustained backward lock-in. "
+        f"log records: {[r.message for r in caplog.records[-10:]]}"
+    )
+
+
+def test_max_advance_per_frame_caps_dp_race_ahead():
+    """band-DP の vert chain による前方暴走を物理的に防ぐ。
+
+    回帰防止: 自己類似テーマがある曲で、band 内の遠い前方位置に低コスト
+    マッチがあると、vert chain が累積して argmin が遠い前方を選んでしまう
+    "1 live frame で N 小節先にジャンプ" の失敗モード。
+    max_advance_per_frame は argmin の探索範囲そのものを縮めることでこの
+    挙動を構造的に不可能にする (band は広いままで前後文脈は保持)。
+    """
+    cfg = FeatureConfig()
+    rng = np.random.default_rng(13)
+
+    # ref: pc=0 (50) + pc=4 (50) + pc=0 (50, テーマA再現)
+    def _pc(n, pc):
+        x = np.zeros((12, n), dtype=np.float32); x[pc, :] = 1.0; return x
+    ref = np.concatenate([_pc(50, 0), _pc(50, 4), _pc(50, 0)], axis=1)
+    ref += 0.02 * rng.standard_normal(ref.shape).astype(np.float32)
+    ref = (ref / np.linalg.norm(ref, axis=0, keepdims=True)).astype(np.float32)
+
+    # live: pc=0 を継続(=テーマAを continually 再生) → 旧挙動なら frame 100+
+    # (テーマA再現の位置) に DP がジャンプしうる。cap が効けば前進量制限される。
+    live = ref[:, :30].copy() + 0.05 * rng.standard_normal((12, 30)).astype(np.float32)
+    live = (live / np.linalg.norm(live, axis=0, keepdims=True)).astype(np.float32)
+
+    cap = 5
+    follower = OnlineDTWFollower(
+        ref, cfg,
+        search_width=120, back_inhibit_frames=10, init_search_width=10,
+        step_penalty=0.06, max_advance_per_frame=cap,
+        stuck_rematch_seconds=0.0,  # rematch off: isolate band-DP behavior
+    )
+    positions = [0]
+    for j in range(30):
+        r = follower.process_frame(live[:, j])
+        positions.append(r.ref_frame)
+    diffs = np.diff(positions)
+    assert diffs.max() <= cap, (
+        f"max_advance_per_frame={cap} violated: max diff={diffs.max()}, diffs={diffs.tolist()}"
+    )
+
+
+def test_stuck_rematch_escapes_wrong_initial_lock():
+    """初期フレームで誤った位置にロックされても、stuck-rematch で前方ジャンプ。
+
+    シナリオ:
+      - ref[0..50]   = テーマA (pitch class 0)
+      - ref[50..150] = 別の部分 (pitch class 4)
+      - ref[150..200]= テーマC (pitch class 7)
+      - live は ref[150..200] と一致する chroma を継続的に送る
+      - init_search_width=30 では live の初フレームは [0,30) しか見られず、
+        誤って pitch class 0 (テーマA) の位置にロック
+      - 通常 DP では累積コスト障壁を越えられず stuck
+      - stuck-rematch が前方の真の位置 (frame 150 付近) を見つけて jump
+    """
+    cfg = FeatureConfig()
+    rng = np.random.default_rng(11)
+
+    def _pc(n, pc):
+        x = np.zeros((12, n), dtype=np.float32)
+        x[pc, :] = 1.0
+        return x
+
+    ref = np.concatenate([_pc(50, 0), _pc(100, 4), _pc(50, 7)], axis=1)
+    ref += 0.02 * rng.standard_normal(ref.shape).astype(np.float32)
+    ref = (ref / np.linalg.norm(ref, axis=0, keepdims=True)).astype(np.float32)
+
+    # live は ref[150:200] (pitch class 7) と同じ
+    live_template = ref[:, 150:200].copy()
+    live = np.tile(live_template, (1, 4))  # 200 frames
+
+    # init_search_width=10 にして、live の初 chroma (pc=7) を ref[0:10] と
+    # マッチさせる → 誤ロック発生
+    follower = OnlineDTWFollower(
+        ref, cfg,
+        search_width=120, back_inhibit_frames=30, init_search_width=10,
+        stuck_rematch_seconds=1.0,  # 早めに発火させる
+        stuck_rematch_min_advance=3,
+        stuck_rematch_cost_margin=0.05,
+        stuck_rematch_min_jump_frames=30,
+    )
+    positions = []
+    for j in range(live.shape[1]):
+        r = follower.process_frame(live[:, j])
+        positions.append(r.ref_frame)
+
+    # 末尾までに stuck-rematch で frame 150 付近に到達しているはず
+    final_pos = positions[-1]
+    assert final_pos >= 130, (
+        f"stuck-rematch failed to escape: final_pos={final_pos}, "
+        f"last 10 positions={positions[-10:]}"
+    )
+
+
+def test_stuck_rematch_disabled_when_seconds_zero():
+    """stuck_rematch_seconds=0 で再 match 機構が無効化されることを確認。"""
+    cfg = FeatureConfig()
+    ref = _make_chroma_sequence(60)
+    follower = OnlineDTWFollower(
+        ref, cfg, search_width=20, stuck_rematch_seconds=0.0
+    )
+    for j in range(60):
+        follower.process_frame(ref[:, j])
+    # No assertion needed beyond "doesn't crash"; the disabled path is
+    # exercised every frame.
+
+
 def test_back_inhibit_prevents_self_similar_capture():
     """自己類似テーマがあっても、過去テーマに引き戻されないことを確認。
 

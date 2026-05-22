@@ -66,8 +66,16 @@ class OnlineDTWFollower:
         search_width: int = 100,
         step_size: int = 1,
         step_penalty: float = 0.02,
+        max_advance_per_frame: int | None = None,
         back_inhibit_frames: int = 30,
         init_search_width: int | None = None,
+        stuck_dp_reset_seconds: float = 6.0,
+        stuck_rematch_seconds: float = 4.0,
+        stuck_rematch_min_advance: int = 3,
+        stuck_rematch_cost_margin: float = 0.08,
+        stuck_rematch_min_jump_frames: int = 60,
+        stuck_rematch_max_jump_frames: int = 480,
+        stuck_rematch_min_discriminability_ratio: float = 0.75,
         confidence_smoothing: int = 5,
     ) -> None:
         """
@@ -81,9 +89,24 @@ class OnlineDTWFollower:
                 widening past ~150 risks self-similarity collapses in
                 repetitive music. ``ConfigLoader.get_oltw_kwargs``
                 exposes this.
-            step_size: maximum number of reference frames the alignment
-                can advance per live frame. Always 1 in the current
-                recurrence; reserved for future tuning.
+            step_size: legacy field, validated to be 1 only. Real
+                control of "how many ref frames advanced per live
+                frame" is via ``max_advance_per_frame`` below.
+            max_advance_per_frame: hard upper bound on how far the new
+                reference position may be from the previous one, per
+                live frame. None (default) = no cap (legacy: band-DP
+                may race ahead when the vertical chain in the band
+                makes a far-forward cell look cheaper than nearby
+                cells, e.g. across a similar passage 10+ measures
+                ahead). Setting this to a small integer (recommended:
+                ~5–10, corresponding to ~0.5–1s of reference) makes
+                the follower advance at "approximately live rate"
+                even when the chroma argmin lies far forward, which
+                is what users normally expect for live performance.
+                Note this is a SOFT cap on the *advance*, not the
+                search band itself: the band may still be ``search_width``
+                wide, so the DP can still see far ahead and adapt
+                gradually over many frames, just not in a single jump.
             step_penalty: extra cost added to "horizontal" (stay at the
                 same reference frame) and "vertical" (advance multiple
                 reference frames per live frame) DP transitions. The
@@ -113,6 +136,63 @@ class OnlineDTWFollower:
                 (~2.8s) so the follower always starts near the score's
                 beginning, even when ``search_width`` is large for
                 tempo flexibility downstream.
+            stuck_dp_reset_seconds: when the follower has failed to
+                advance for this many seconds, wipe the accumulated DP
+                cost field (set D_prev to inf everywhere except the
+                current position, which is anchored at cost 0). The
+                position itself is NOT changed — this is a "soft"
+                escape that only erases the cost memory that's keeping
+                the DP locked. After a reset the system can only move
+                forward from the current position; any "go back to
+                frame X" attractor is physically removed.
+                This is the safe complement to ``stuck_rematch_*``:
+                rematch can teleport to a (potentially wrong) faraway
+                forward position, while this just unsticks in place.
+                Set to 0 to disable. Default 6.0s.
+            stuck_rematch_seconds: trigger a global rematch attempt
+                after the position has failed to advance by at least
+                ``stuck_rematch_min_advance`` frames for this many
+                seconds. Set to 0 to disable. Default 4.0s.
+                Escape hatch for the "cumulative cost barrier" failure
+                mode: when OLTW locks onto a wrong reference position
+                (e.g. mic input first-frame match against silence), the
+                accumulated DP cost there is much lower than the inf
+                seed elsewhere, and the DP cannot escape via local
+                steps. This re-anchors on the strongest forward match
+                in the whole reference.
+            stuck_rematch_min_advance: number of frames per
+                ``stuck_rematch_seconds`` window below which the
+                follower is considered "stuck". Default 3 (~ 0.07x
+                forward rate at feature_rate=10.77 Hz).
+            stuck_rematch_cost_margin: minimum local-cost improvement
+                required for a stuck-rematch jump to be accepted.
+                Prevents oscillation when the current and global-best
+                positions are nearly equivalent. Default 0.05 (matches
+                the margin used in confidence scoring).
+            stuck_rematch_min_jump_frames: minimum forward distance a
+                stuck-rematch jump must cover. The escape hatch is for
+                gross mislocks, not local jitter — small forward jumps
+                should be handled by normal DP, not by this mechanism.
+                Default 60 (~5.6s).
+            stuck_rematch_max_jump_frames: maximum forward distance the
+                rematch may jump. Caps catastrophic mis-jumps where a
+                self-similar passage far ahead in the score (e.g. the
+                end of a march/the recapitulation) happens to match the
+                current live chroma. Default 720 (~67s).
+            stuck_rematch_min_discriminability_ratio: how SHARPLY the
+                global-best position must stand out from the bulk of
+                forward positions to accept the jump. Defined as
+                (median_forward_cost - best_cost) / median_forward_cost
+                — i.e. the relative gap to the typical-position cost,
+                normalised so the threshold is meaningful across both
+                "everywhere matches well" (low absolute costs) and
+                "everywhere matches poorly" (high absolute costs)
+                cases. Default 0.75: the best must beat the median by
+                at least 75% of the median's value. Empirically, mic
+                captures of mid-piece live music produce ratios around
+                0.60-0.70 (ambiguous) while a true large-jump escape
+                from an initial mislock shows ratios > 0.95 (decisive
+                peak in chroma space).
             confidence_smoothing: window (frames) for confidence EMA.
         """
         if reference_cens.ndim != 2 or reference_cens.shape[0] != 12:
@@ -136,6 +216,11 @@ class OnlineDTWFollower:
         self._search_width = int(search_width)
         self._step_size = int(step_size)
         self._step_penalty = float(step_penalty)
+        self._max_advance_per_frame = (
+            int(max_advance_per_frame) if max_advance_per_frame is not None else None
+        )
+        if self._max_advance_per_frame is not None and self._max_advance_per_frame < 0:
+            raise ValueError("max_advance_per_frame must be >= 0 (or None to disable)")
         self._back_inhibit_frames = int(back_inhibit_frames)
         self._init_search_width = (
             int(init_search_width)
@@ -144,6 +229,40 @@ class OnlineDTWFollower:
         )
         if self._init_search_width <= 0:
             raise ValueError("init_search_width must be > 0")
+        if stuck_dp_reset_seconds < 0:
+            raise ValueError("stuck_dp_reset_seconds must be >= 0")
+        if stuck_rematch_seconds < 0:
+            raise ValueError("stuck_rematch_seconds must be >= 0")
+        self._stuck_dp_reset_seconds = float(stuck_dp_reset_seconds)
+        self._stuck_dp_reset_frames = int(
+            round(self._stuck_dp_reset_seconds * self._cfg.effective_frame_rate())
+        )
+        # Separate counter from rematch so they can fire on independent
+        # cadences without interfering with each other.
+        self._stuck_dp_counter = 0
+        self._stuck_dp_window_start_pos = 0
+        # Count how often the unclamped argmin wants to go BACKWARD
+        # during the window. This is the signature of "DP locked by
+        # backward-attractor in cumulative cost" — the failure mode
+        # DP reset is meant to fix. Slow forward advance without
+        # backward attempts is a *different* failure mode (degraded
+        # chroma matching) that DP reset can only hurt, not help.
+        self._backward_attempts_in_window = 0
+        self._stuck_rematch_seconds = float(stuck_rematch_seconds)
+        self._stuck_rematch_min_advance = int(stuck_rematch_min_advance)
+        self._stuck_rematch_cost_margin = float(stuck_rematch_cost_margin)
+        self._stuck_rematch_min_jump_frames = int(stuck_rematch_min_jump_frames)
+        self._stuck_rematch_max_jump_frames = int(stuck_rematch_max_jump_frames)
+        self._stuck_rematch_min_discriminability_ratio = float(
+            stuck_rematch_min_discriminability_ratio
+        )
+        # Stuck tracking: how many frames since we last saw a "real"
+        # forward advance, and where we were at the start of the window.
+        self._stuck_window_frames = int(
+            round(self._stuck_rematch_seconds * self._cfg.effective_frame_rate())
+        )
+        self._stuck_counter = 0
+        self._stuck_window_start_pos = 0
 
         # DP previous column, size N_ref. Initialised to +inf except the
         # initial seed at frame 0 = 0.0 (we let the first live frame "land"
@@ -242,6 +361,78 @@ class OnlineDTWFollower:
             band_hi=hi,
         )
 
+    def _try_global_rematch(self, live: np.ndarray, current_local_cost: float) -> bool:
+        """If a forward position has a much better local match, jump there.
+
+        Searches a *bounded* forward window of the reference (capped by
+        ``stuck_rematch_max_jump_frames``) for the best local cost, and
+        only jumps if all three guards pass:
+
+        1. The candidate beats the current position by at least
+           ``stuck_rematch_cost_margin`` (do something only if it helps).
+        2. The candidate beats the median forward cost by at least
+           ``stuck_rematch_min_discriminability`` (don't trust the
+           "best" when many candidates are essentially tied — that's
+           the signature of a non-discriminative chroma profile, e.g.
+           a different orchestration of the same theme, and the global
+           argmin is then dominated by chance / self-similarity).
+        3. The jump distance is within the configured window.
+
+        Returns True if a jump was performed.
+        """
+        min_jump_pos = self._current_ref_pos + self._stuck_rematch_min_jump_frames
+        if min_jump_pos >= self._N:
+            return False
+        max_jump_pos = min(
+            self._N, self._current_ref_pos + self._stuck_rematch_max_jump_frames + 1
+        )
+        if max_jump_pos <= min_jump_pos:
+            return False
+        forward_block = self._ref[:, min_jump_pos:max_jump_pos]
+        global_costs = 1.0 - forward_block.T @ live  # (block_size,)
+        best_offset = int(np.argmin(global_costs))
+        best_cost = float(global_costs[best_offset])
+
+        # Guard 1: must beat the current position.
+        if current_local_cost - best_cost < self._stuck_rematch_cost_margin:
+            return False
+
+        # Guard 2: the best must stand out RELATIVE to typical forward
+        # positions, not just by an absolute margin. Use a ratio so the
+        # threshold is meaningful whether absolute costs are tiny (perfect
+        # match exists) or large (mic capture of a different performance).
+        # An absolute margin alone misclassifies both ends: it rejects
+        # clean perfect matches whose median is also low (lead-time
+        # scenario), and accepts ambiguous mic matches whose median is
+        # moderate (the false-jump scenario).
+        median_cost = float(np.median(global_costs))
+        if median_cost <= 0:
+            return False  # degenerate; nothing to compare against
+        discriminability_ratio = (median_cost - best_cost) / median_cost
+        if discriminability_ratio < self._stuck_rematch_min_discriminability_ratio:
+            logger.debug(
+                "OLTW stuck-rematch: skipping jump, low discriminability "
+                "ratio %.2f (best %.3f, median %.3f)",
+                discriminability_ratio, best_cost, median_cost,
+            )
+            return False
+
+        new_pos = min_jump_pos + best_offset
+        logger.info(
+            "OLTW stuck-rematch: jumping ref_frame %d→%d "
+            "(local cost %.3f→%.3f, discrim_ratio %.2f, median %.3f)",
+            self._current_ref_pos, new_pos,
+            current_local_cost, best_cost,
+            discriminability_ratio, median_cost,
+        )
+        # Reseed DP: clear cumulative history, anchor at the new position.
+        self._D_prev[:] = np.inf
+        self._D_prev[new_pos] = best_cost
+        self._prev_band_lo = new_pos
+        self._prev_band_hi = new_pos + 1
+        self._current_ref_pos = new_pos
+        return True
+
     def _process_subsequent_frame(self, live: np.ndarray) -> FollowResult:
         """Standard DP update for live frames > 0.
 
@@ -311,8 +502,28 @@ class OnlineDTWFollower:
         # prefer the *rightmost* (most-advanced) — this is the second
         # half of the forward bias: even if step_penalty doesn't fully
         # separate them, the tie-break still moves us forward.
-        min_cost = float(D_curr_band_arr.min())
-        candidates = np.where(D_curr_band_arr <= min_cost + 1e-6)[0]
+        #
+        # Cap the argmin search range so a single live frame cannot
+        # advance the reference position by more than
+        # ``max_advance_per_frame``. Without this cap the vertical
+        # chain D_curr[k] = D_curr[k-1] + local + penalty propagates
+        # cheap forward seeds across the whole band, and a far-ahead
+        # position whose chroma happens to match (e.g. an early
+        # recurrence of the current theme, or a similarly-orchestrated
+        # passage 15 measures later) can win the argmin — producing
+        # the "the follower suddenly jumped 20 measures forward"
+        # failure. The cap keeps the band wide (so the DP retains
+        # context for tempo flexibility), but constrains the *acted-on*
+        # advance to live rate.
+        if self._max_advance_per_frame is not None:
+            max_band_idx = (self._current_ref_pos - lo) + self._max_advance_per_frame
+            max_band_idx = min(max_band_idx, band_width - 1)
+        else:
+            max_band_idx = band_width - 1
+        # argmin within [0, max_band_idx]
+        capped_band = D_curr_band_arr[: max_band_idx + 1]
+        min_cost = float(capped_band.min())
+        candidates = np.where(capped_band <= min_cost + 1e-6)[0]
         best_in_band = int(candidates.max())
         new_pos = lo + best_in_band
         local_cost_at_best = float(local_costs[best_in_band])
@@ -328,12 +539,81 @@ class OnlineDTWFollower:
                 self._current_ref_pos, new_pos,
             )
             new_pos = self._current_ref_pos
+            self._backward_attempts_in_window += 1
 
         self._D_prev = D_curr
         self._prev_band_lo = lo
         self._prev_band_hi = hi
         self._current_ref_pos = new_pos
         self._live_frame_idx += 1
+
+        # ---- stuck detection: DP reset (in-place unstick) ------------
+        # If the position has barely advanced over the configured
+        # window, wipe the cumulative DP cost. This breaks the
+        # "frame X-back-from-here looks cheaper than current" trap
+        # without changing position. After a reset the DP can only
+        # advance forward from the current frame.
+        self._stuck_dp_counter += 1
+        if (
+            self._stuck_dp_reset_frames > 0
+            and self._stuck_dp_counter >= self._stuck_dp_reset_frames
+        ):
+            advance = self._current_ref_pos - self._stuck_dp_window_start_pos
+            # Trigger the reset only when (a) we genuinely failed to
+            # advance AND (b) the DP repeatedly tried to step backward
+            # in the window — that's the cumulative-cost lock-in
+            # signature. Without (b), the system is just tracking slow
+            # forward material; wiping memory there would lose useful
+            # forward seeds.
+            min_backward_attempts = max(
+                3, self._stuck_dp_reset_frames // 4
+            )
+            if (
+                advance < self._stuck_rematch_min_advance
+                and self._backward_attempts_in_window >= min_backward_attempts
+            ):
+                logger.info(
+                    "OLTW DP reset: wiping backward cumulative cost at ref_frame=%d "
+                    "(stuck %d frames, advance=%d, backward_attempts=%d)",
+                    self._current_ref_pos, self._stuck_dp_counter,
+                    advance, self._backward_attempts_in_window,
+                )
+                # Wipe ONLY backward memory — kills the "go back to
+                # frame X" attractor — while keeping any forward
+                # cumulative state intact, so DP can still pick up
+                # legitimate forward matches that already accumulated.
+                self._D_prev[: self._current_ref_pos] = np.inf
+                # Re-anchor the current position low so the next frame
+                # is guaranteed to have a finite seed at lo' = current.
+                self._D_prev[self._current_ref_pos] = 0.0
+                self._prev_band_lo = self._current_ref_pos
+            self._stuck_dp_window_start_pos = self._current_ref_pos
+            self._stuck_dp_counter = 0
+            self._backward_attempts_in_window = 0
+
+        # ---- stuck detection + global rematch escape hatch -----------
+        # Track advance over a sliding window. If the position fails to
+        # advance by stuck_rematch_min_advance frames over the window,
+        # search the whole reference for a strongly-better forward match
+        # and re-anchor there.
+        self._stuck_counter += 1
+        if self._stuck_window_frames > 0 and self._stuck_counter >= self._stuck_window_frames:
+            advance = self._current_ref_pos - self._stuck_window_start_pos
+            if advance < self._stuck_rematch_min_advance:
+                jumped = self._try_global_rematch(live, local_cost_at_best)
+                if jumped:
+                    new_pos = self._current_ref_pos
+                    local_cost_at_best = float(
+                        1.0 - self._ref[:, new_pos] @ live
+                    )
+                    # After a jump the band is reset around the new pos;
+                    # surface band info to caller so logs are honest.
+                    lo = max(0, new_pos - min(self._search_width, self._back_inhibit_frames))
+                    hi = min(self._N, new_pos + self._search_width + 1)
+            # Reset the window regardless of outcome — otherwise a failed
+            # rematch leaves us re-checking every single subsequent frame.
+            self._stuck_window_start_pos = self._current_ref_pos
+            self._stuck_counter = 0
 
         with self._state_lock:
             self._cost_history.append(local_cost_at_best)
@@ -399,6 +679,11 @@ class OnlineDTWFollower:
             self._frozen = False
             self._frozen_pos = None
             self._cost_history.clear()
+            self._stuck_counter = 0
+            self._stuck_window_start_pos = 0
+            self._stuck_dp_counter = 0
+            self._stuck_dp_window_start_pos = 0
+            self._backward_attempts_in_window = 0
         logger.info("OLTW reset")
 
     # ------------------------------------------------------------ getters
