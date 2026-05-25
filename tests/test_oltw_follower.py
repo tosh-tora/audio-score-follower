@@ -592,6 +592,192 @@ def test_stuck_dp_reset_fires_on_backward_lockin(caplog):
     )
 
 
+def test_rapid_dp_reset_fires_before_full_window(caplog):
+    """Rapid reset triggers within 10 consecutive backward frames, well
+    before the full stuck_dp_reset_seconds window elapses.
+
+    回帰防止: 後退アトラクタが 10 フレーム連続で続いた時点でフルウィンドウ
+    （~54 フレーム）より早く "rapid DP reset" が発火すること。
+
+    実際の障害パターン再現: ref の中間地点で chroma が A→B に急変し、
+    直後に A クロマを投入すると「1 つ前の位置 (A) が今の位置 (B) より
+    低コスト」という後退アトラクタが発生する。
+    これは m=117 の raw_cost 0.06→0.20 急騰と同じ構造。
+    """
+    import logging
+    cfg = FeatureConfig()
+
+    # Build reference: positions 0-19 = pitch class 0 (chroma A),
+    # positions 20-59 = pitch class 6 (chroma B, maximally different).
+    n = 60
+    ref = np.zeros((12, n), dtype=np.float32)
+    ref[0, :20] = 1.0   # A
+    ref[6, 20:] = 1.0   # B
+    norms = np.linalg.norm(ref, axis=0, keepdims=True)
+    norms[norms == 0] = 1.0
+    ref = (ref / norms).astype(np.float32)
+
+    follower = OnlineDTWFollower(
+        ref, cfg,
+        search_width=40, back_inhibit_frames=20, init_search_width=10,
+        step_penalty=0.06,
+        stuck_dp_reset_seconds=5.0,   # full window ≈ 54 frames at 10.77 Hz
+        stuck_rematch_seconds=0.0,
+    )
+    # Track through the A region (perfect match, low local costs).
+    for j in range(20):
+        follower.process_frame(ref[:, j])
+    # Feed one B frame — DP advances into position 20 (ref[:,20]=B, low cost).
+    follower.process_frame(ref[:, 20])
+    pos_before = follower._current_ref_pos  # should be ≥ 20
+
+    # Now feed chroma A repeatedly. Local cost at pos 20 (=B) is ~1.0
+    # (high), while local cost at pos 19 (=A) is ~0. D_prev[19] is fresh
+    # (set just two frames ago), so the unclamped argmin prefers 19 →
+    # backward attempt every frame → _consecutive_backward_frames grows.
+    chroma_A = ref[:, 0].copy()
+    rapid_reset_frame: int | None = None
+    with caplog.at_level(logging.INFO, logger="audio_score_follower.core.oltw_follower"):
+        for k in range(15):
+            follower.process_frame(chroma_A)
+            if any("rapid DP reset" in rec.message for rec in caplog.records):
+                rapid_reset_frame = k + 1
+                break
+
+    assert rapid_reset_frame is not None, (
+        "Rapid DP reset never fired despite every-frame backward lock-in. "
+        f"log: {[r.message for r in caplog.records[-10:]]}"
+    )
+    # Must fire well before the full 54-frame window.
+    assert rapid_reset_frame <= 12, (
+        f"Rapid reset took {rapid_reset_frame} backward frames "
+        f"(expected ≤ 12, i.e. _RAPID_RESET_FRAMES=10 plus margin)"
+    )
+    # After rapid reset, D_prev[<current] = inf, so DP can only advance
+    # forward. Feeding a B frame should not retreat below pos_before.
+    result_after = follower.process_frame(ref[:, min(pos_before + 1, n - 1)])
+    assert result_after.ref_frame >= pos_before, (
+        f"Position retreated after rapid reset: "
+        f"before={pos_before}, after={result_after.ref_frame}"
+    )
+
+
+def _build_distinctive_ref(n: int = 80, seed: int = 19) -> np.ndarray:
+    """Random unit-chroma reference where every position is unique.
+
+    Needed by the catchup tests: we want a clear local-cost minimum
+    at the "true music position" rather than the ambiguous matches
+    one-hot cyclic chroma gives.
+    """
+    rng = np.random.default_rng(seed)
+    ref = np.abs(rng.standard_normal((12, n)).astype(np.float32))
+    norms = np.linalg.norm(ref, axis=0, keepdims=True)
+    return (ref / norms).astype(np.float32)
+
+
+def test_rapid_reset_catchup_jumps_forward_when_music_advanced(caplog):
+    """rapid reset 後の catchup が前方にジャンプして遅延を縮める。
+
+    シナリオ: stall 中に live audio は ~10 frame 進んでいる前提。
+    rapid reset 発火直後の次フレームで、stall 位置より ~10 frame 先の
+    リファレンスにマッチする chroma を投入すると、catchup が前方ジャンプ
+    して累積遅延を解消する。
+    """
+    import logging
+    cfg = FeatureConfig()
+    ref = _build_distinctive_ref(80)
+
+    follower = OnlineDTWFollower(
+        ref, cfg,
+        search_width=40, back_inhibit_frames=20, init_search_width=10,
+        step_penalty=0.06,
+        stuck_dp_reset_seconds=5.0,
+        stuck_rematch_seconds=0.0,
+        stuck_rematch_cost_margin=0.08,
+    )
+    # Advance to position ~30.
+    for j in range(30):
+        follower.process_frame(ref[:, j])
+    stall_pos = follower._current_ref_pos
+    # Force a backward-attractor stall: feed an earlier-position
+    # chroma until rapid reset fires. Use a position close enough to
+    # the current one that D_prev there is still fresh.
+    backward_chroma = ref[:, max(0, stall_pos - 1)].copy()
+    with caplog.at_level(logging.INFO, logger="audio_score_follower.core.oltw_follower"):
+        for _ in range(15):
+            follower.process_frame(backward_chroma)
+            if any("rapid DP reset" in rec.message for rec in caplog.records):
+                break
+    assert any("rapid DP reset" in rec.message for rec in caplog.records), (
+        "Setup failed: rapid reset did not fire"
+    )
+    pos_after_reset = follower._current_ref_pos
+
+    # The very next live frame: feed chroma matching ~10 positions
+    # ahead of the stall (simulating "live audio kept playing during
+    # the stall"). The catchup should fire and jump forward.
+    target_pos = min(pos_after_reset + 10, ref.shape[1] - 1)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="audio_score_follower.core.oltw_follower"):
+        result = follower.process_frame(ref[:, target_pos])
+
+    assert any("rapid-reset catchup" in rec.message for rec in caplog.records), (
+        f"Catchup did not fire. log: {[r.message for r in caplog.records]}"
+    )
+    # Position should have jumped to (or very close to) target_pos.
+    assert result.ref_frame >= target_pos - 2, (
+        f"Catchup did not close the lag: "
+        f"target={target_pos}, got={result.ref_frame}"
+    )
+
+
+def test_rapid_reset_catchup_stays_put_when_music_paused(caplog):
+    """音楽が止まっていれば catchup はスキップされる。
+
+    シナリオ: stall 中に音楽も止まっていた（指揮者が長くキープ）場合、
+    次フレームの chroma は stall 位置と同じ。catchup は cost margin
+    guard で前進をスキップし、DP は stall 位置から通常追従を再開する。
+    """
+    import logging
+    cfg = FeatureConfig()
+    ref = _build_distinctive_ref(80)
+
+    follower = OnlineDTWFollower(
+        ref, cfg,
+        search_width=40, back_inhibit_frames=20, init_search_width=10,
+        step_penalty=0.06,
+        stuck_dp_reset_seconds=5.0,
+        stuck_rematch_seconds=0.0,
+        stuck_rematch_cost_margin=0.08,
+    )
+    for j in range(30):
+        follower.process_frame(ref[:, j])
+    stall_pos = follower._current_ref_pos
+    backward_chroma = ref[:, max(0, stall_pos - 1)].copy()
+    with caplog.at_level(logging.INFO, logger="audio_score_follower.core.oltw_follower"):
+        for _ in range(15):
+            follower.process_frame(backward_chroma)
+            if any("rapid DP reset" in rec.message for rec in caplog.records):
+                break
+    assert any("rapid DP reset" in rec.message for rec in caplog.records)
+    pos_after_reset = follower._current_ref_pos
+
+    # Feed a chroma that matches the stall position itself (music paused).
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="audio_score_follower.core.oltw_follower"):
+        result = follower.process_frame(ref[:, pos_after_reset])
+
+    assert not any("rapid-reset catchup" in rec.message for rec in caplog.records), (
+        f"Catchup should not have fired (music paused). "
+        f"log: {[r.message for r in caplog.records]}"
+    )
+    # Position should be at or very close to stall position (no jump).
+    assert abs(result.ref_frame - pos_after_reset) <= 1, (
+        f"Position drifted unexpectedly: "
+        f"stall={pos_after_reset}, after={result.ref_frame}"
+    )
+
+
 def test_max_advance_per_frame_caps_dp_race_ahead():
     """band-DP の vert chain による前方暴走を物理的に防ぐ。
 
