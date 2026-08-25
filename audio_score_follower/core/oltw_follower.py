@@ -46,6 +46,11 @@ _RAPID_RESET_FRAMES = 10
 # Cost margin between best and second-best DP cell that counts as a
 # fully "decisive" minimum for confidence scoring. Coupled with
 # lock_in_confidence: rescaling this rescales effective confidence.
+# Do NOT retune it to make the GUI read better — this is the INTERNAL
+# confidence, a band-relative score whose scale lock_in_confidence, the
+# trigger floor and the inertia-resync gate are all calibrated against.
+# The GUI shows a separate absolute figure (result_handler.
+# display_confidence_from_cost); adjust that one instead.
 _CONFIDENCE_FULL_MARGIN = 0.05
 # Tie-break tolerance for the in-band argmin (float32 noise floor).
 _ARGMIN_TIE_EPS = 1e-6
@@ -315,7 +320,9 @@ class OnlineDTWFollower:
                 matched alt-performance longest run above 0.18 is 5.4s
                 (48% margin below the 8s duration gate), while
                 wrong-piece / offset scenarios sustain 13-30s runs.
-                Set 0 to disable the detector entirely.
+                Set 0 to disable the detector entirely. Full calibration
+                table and the re-calibration procedure for a new piece:
+                ``docs/calibration.md``.
             mismatch_seconds: the cost must stay above the threshold for
                 this long CONTINUOUSLY before the mismatch flag raises.
                 Must comfortably exceed the matched-performance longest
@@ -858,12 +865,16 @@ class OnlineDTWFollower:
         count that keeps advancing while drifted from the performance
         never trips them. This detector watches the ABSOLUTE smoothed
         fused cost instead: on a correct performance it sits in the
-        matched band (alt p50 ≈ 0.08) with only transient excursions
-        (longest measured run above 0.20 is 5.0s), while a drifted /
-        wrong-input state sustains 13-30s runs. Sustained excess raises
-        ``_mismatch_active``; the runtime then suppresses triggers, shows
-        a GUI warning, and this method probes a bounded forward window
-        for a triple-guarded re-anchor once per probe interval.
+        matched band with only transient excursions, while a drifted /
+        wrong-input state sustains far longer runs. Sustained excess
+        raises ``_mismatch_active``; the runtime then suppresses
+        triggers, shows a GUI warning, and this method probes a bounded
+        forward window for a re-anchor once per probe interval, behind
+        the four guards in ``_try_mismatch_recovery``.
+
+        Calibration figures live in ``docs/calibration.md`` — see the
+        ``mismatch_cost_threshold`` / ``mismatch_seconds`` entries in
+        ``__init__`` for the invariant they have to satisfy.
 
         This also upgrades the one-shot post-seek catchup: after a coarse
         manual → / ← correction (trigger-measure granularity) misses, the
@@ -932,15 +943,21 @@ class OnlineDTWFollower:
     def _try_mismatch_recovery(self, live: np.ndarray) -> bool:
         """Bounded forward re-anchor attempt while mismatched.
 
-        Reuses ``_probe_decisive_forward_match`` (relative guards: cost
-        margin + discriminability ratio) and adds a third ABSOLUTE guard:
-        the candidate's local cost must be inside the matched band
-        (``mismatch_recovery_cost_ceiling``). The historical catchup
-        false-jump cycle (jump → monitor → reset → jump …) happened
-        because only relative guards existed — on wrong-input audio the
-        "best" of a junk window still won relatively. Forward-only and
-        bounded: backward correction stays manual (←), and a global
-        search would teleport to far self-similar repeats (measured).
+        Four guards, in order. 1 and 2 come from
+        ``_probe_decisive_forward_match`` and are RELATIVE: cost margin,
+        then discriminability ratio. 3 is ABSOLUTE — the candidate's
+        local cost must be inside the matched band
+        (``mismatch_recovery_cost_ceiling``). 4 is TEMPORAL — a second
+        consecutive probe must land where the performance would have
+        advanced to.
+
+        The historical catchup false-jump cycle (jump → monitor → reset
+        → jump …) happened because only the relative guards existed — on
+        wrong-input audio the "best" of a junk window still won
+        relatively. Guard 4 was then added because a single junk frame
+        can dip under the ceiling by chance. Forward-only and bounded:
+        backward correction stays manual (←), and a global search would
+        teleport to far self-similar repeats (measured).
 
         Returns True if a jump was performed.
         """
@@ -1162,6 +1179,12 @@ class OnlineDTWFollower:
                 self._consecutive_backward_frames,
                 self._current_ref_pos,
             )
+            # The reseed is load-bearing, not bookkeeping: without it the
+            # backward attractor survives the reset, the very next frame
+            # produces another backward argmin, and rapid reset re-fires
+            # every frame from here on. Wiping backward memory AND giving
+            # the current position a finite seed is what actually breaks
+            # the cycle.
             self._D_prev[: self._current_ref_pos] = np.inf
             self._D_prev[self._current_ref_pos] = 0.0
             self._prev_band_lo = self._current_ref_pos
@@ -1431,6 +1454,13 @@ class OnlineDTWFollower:
         output position (what the GUI / score-mapper sees) is read
         through the ``current_ref_frame`` property and ``FollowResult.ref_frame``,
         both of which prefer ``_inertia_ref_pos`` when inertia is active.
+
+        Writing ``_current_ref_pos`` from here corrupts the DP rather
+        than merely nudging the display: the band is centred on that
+        anchor, so it drifts off the real alignment, and the reseed in
+        stuck_dp_reset / rapid_dp_reset (which initialises ``D_prev``
+        relative to the anchor) then seeds from a bogus position. This
+        trap has been hit before — keep the two positions separate.
 
         After ``_max_inertia_frames`` have elapsed, ``_inertia_ref_pos``
         is held constant (cap). Accumulated rate-estimate error can't
