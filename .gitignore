@@ -43,7 +43,9 @@ debug_*.py
 scratch/
 
 # Claude
-# settings.local.json は端末固有なので除外。rules/ は CLAUDE.md と同じく
-# プロジェクトの規約なので追跡する（該当ファイルを読んだときだけ読み込まれる）。
+# settings.local.json は端末固有なので除外。rules/・settings.json（hooks
+# 設定）・hooks/ はプロジェクトの規約なので追跡する。
 .claude/*
 !.claude/rules/
+!.claude/settings.json
+!.claude/hooks/
