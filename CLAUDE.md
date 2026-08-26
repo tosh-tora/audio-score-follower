@@ -29,7 +29,7 @@ python tasks/eval_tracking.py --built-dir <dir> --score <mxl> --input-wav <wav>
 | 領域ごとの作業規約・検証手順 | `.claude/rules/*.md`（該当ファイルを読むと自動で載る） |
 | 全セッションに効く規則・ワークフロー | このファイル |
 
-この表は `tests/test_docs_guard.py` が機械的に守っている（CLAUDE.md の行数上限・リンク切れ・校正値の食い違い・制約の消失）。**このファイルが長くなって上限に触れたら、行を削るのではなく上表に従って移動先を選ぶこと。**
+この表は `tests/test_docs_guard.py` が機械的に守っている（CLAUDE.md の行数上限・リンク切れ・校正値の食い違い・制約の消失）。**このファイルが長くなって上限に触れたら、行を削るのではなく上表に従って移動先を選ぶこと。** CLAUDE.md / README.md / docs/*.md / .claude/rules/*.md の編集後は `.claude/hooks/check_docs.py`（PostToolUse hook）が自動で流す。CI（`.github/workflows/tests.yml`）は push / PR で全テストを実行する。
 
 作業を始める前に読むもの:
 
