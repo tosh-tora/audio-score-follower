@@ -2,9 +2,11 @@
 """
 asf-build — offline reference builder CLI.
 
-Synthesises the score MusicXML via MuseScore 4 CLI (see
-tasks/generate_score_wav.py), then runs MrMsDTW to align the synthesis
-against a real performance recording. Output is a directory containing
+Synthesises the score MusicXML via FluidSynth (see
+tasks/generate_score_wav.py; the executable is located by
+core/synth_locator.py — MuseScore 4's CLI hangs in batch mode and is
+not used), then runs MrMsDTW to align the synthesis against a real
+performance recording. Output is a directory containing
 ``warping_path.npz``, ``reference_cens.npy``, and a JSON metadata
 sidecar. Runs entirely on Windows native — no WSL2 needed.
 

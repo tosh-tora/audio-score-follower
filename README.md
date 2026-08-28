@@ -7,7 +7,19 @@
 
 姉妹プロジェクト [live-score-sync](../live-score-sync) の note-based matcher（pymatchmaker）が
 オーケストラの密音響で破綻した反省から、本プロジェクトは audio-to-audio で全てを行う。
-内部設計・チューニング根拠・開発上の制約は [CLAUDE.md](CLAUDE.md) にまとめてある。
+
+この README は**運用者向け**（セットアップ・CLI・config・本番手順）。内部設計と開発上の制約は
+`docs/` にある:
+
+| | |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | 全体像・コード地図 |
+| [docs/oltw.md](docs/oltw.md) | 追随ロジック（lock-in / 慣性 / mismatch 検知） |
+| [docs/features.md](docs/features.md) | 特徴量 CENS + onset |
+| [docs/offline-build.md](docs/offline-build.md) | ビルドと warp path |
+| [docs/launcher.md](docs/launcher.md) | 入力モードとランチャー |
+| [docs/calibration.md](docs/calibration.md) | 閾値の校正根拠・実測値 |
+| [docs/experiments.md](docs/experiments.md) | 試して捨てた案 |
 
 ## 特徴
 
@@ -81,10 +93,14 @@ playwright install chromium
 飛ばすと `--slide-url` 起動時にブラウザが開かず、GUI にオレンジの警告バナーが表示される。
 
 **synctoolbox の注意**: 上記 `pip install` で synctoolbox は古い numpy / pandas / music21 を
-要求して解決に失敗することがある (1.4.1 時点)。失敗した場合は `--no-deps` で入れ直す:
+要求して解決に失敗することがある。失敗した場合は synctoolbox / libfmp だけを `--no-deps` で
+入れ直し、その依存先（ipython・pandas）は普通にインストールする（`--no-deps` に含めると
+`libfmp` が実際に import 時点で必要とする `pandas` や `ipython` の依存（`traitlets` 等）まで
+省かれてしまい、クリーンな環境で `ModuleNotFoundError` になる）:
 
 ```powershell
-pip install --no-deps synctoolbox libfmp ipython
+pip install --no-deps synctoolbox libfmp
+pip install ipython pandas
 ```
 
 実行時の numpy 2.x 互換問題は `reference_builder.py` 側でモンキーパッチ済み。
@@ -175,7 +191,7 @@ BPM を逆算する（例: 幻想4 = 712 ビート / 281s → BPM 152）。楽�
 `reference_start_offset_sec` に記録される。
 
 **`--cens-win`**: 窓を縮める A/B（41→21→11）では判別能が改善しなかったため**既定の 41 を推奨**。
-実験用フラグとして残している（実測の詳細は CLAUDE.md「確信度の二本立てと特徴量の判別能」）。
+実験用フラグとして残している（A/B の実測は [docs/experiments.md](docs/experiments.md)）。
 
 **`--hop-length`**: フレームレート = `sample_rate / hop_length`（既定 ≈10.77 Hz）。ランタイムの
 マッチング特徴のみに影響し、オフラインの warp path アラインメント（synctoolbox の 50 Hz 固定
@@ -250,7 +266,7 @@ stddev、トリガー可能フレーム率（`conf >= 0.30`）。`--csv` で per
 （`live_time, ref_frame, dp_ref_frame, measure, confidence, raw_local_cost`）をダンプできる。
 `--oltw-kwargs` は config を編集せずデフォルトに JSON を上書きマージする。
 `--follower posterior` は実験用の全域観測ベイズフィルタで駆動する（**本番は oltw 固定**。
-経緯は CLAUDE.md）。
+既定化を見送った経緯は [docs/experiments.md](docs/experiments.md)）。
 
 ### 6. ランチャー GUI（引数なし起動）
 
@@ -453,7 +469,8 @@ GUI 起動後の操作：
 
 GUI の「確信度」は**絶対マッチ品質**（融合局所コストの 5 フレーム平滑を 0.05→0.22 で 1→0 に
 線形写像）を表示する。OLTW 内部の confidence（band 相対値）は無関係な音でも 0.6-0.8 に
-張り付くため、表示には使わない（実測根拠は CLAUDE.md「確信度の二本立て」）：
+張り付くため、表示には使わない（写像の校正根拠は
+[docs/calibration.md](docs/calibration.md#2-表示確信度の-lo-と-hi)）：
 
 | 入力 | 内部 conf | GUI 表示 |
 |---|---|---|
@@ -482,7 +499,7 @@ GUI の「確信度」は**絶対マッチ品質**（融合局所コストの 5 
 48 秒で検知。全シナリオで誤ジャンプゼロ。既知の限界: ①白色ノイズはコスト帯が重なり検知不能
 （silence gate が主防御）②ずれ先が自己類似箇所だと検知・自動訂正とも原理的に不能 — この場合も
 手動補正は機能する。閾値は幻想4 の実測校正値なので、曲・録音条件が大きく変わったら再校正する
-（手順は CLAUDE.md「mismatch 検知」）。
+（手順は [docs/calibration.md](docs/calibration.md#1-mismatch-検知の閾値)）。
 
 ### 演奏とカウントがずれた時の対処
 
@@ -530,7 +547,7 @@ Slide left  [manual] measure=17 note=テーマA      ← 人手で ←
 
 ## OLTW 設計メモ（運用者向け要約）
 
-内部設計・チューニング根拠・変更時の注意は [CLAUDE.md](CLAUDE.md)「OLTW の状態機械」参照。
+内部設計・チューニング根拠・変更時の注意は [docs/oltw.md](docs/oltw.md) 参照。
 ここでは運用時の設定調整と画面の見方に必要な範囲だけまとめる。
 
 オーケストラ的密音響 + 別演奏追従で起きる失敗モードと対処（config で調整可能）：
@@ -552,8 +569,8 @@ Slide left  [manual] measure=17 note=テーマA      ← 人手で ←
 - **gate の統治期間（マイクモード）**: gate が追随の停止/再開を制御するのは「▶ 演奏開始」
   押下から**最初の持続音（または `start_gate_timeout_sec` の見切りタイムアウト）まで**。
   どちらかで「演奏進行中」と確定し（one-shot）、以後は音量が閾値を割っても追随は
-  止まらない。弱奏・休符は DP がそのまま追う（設計経緯は CLAUDE.md の Issue #13 /
-  #41 の項）
+  止まらない。弱奏・休符は DP がそのまま追う（設計経緯は Issue #13 / #41、詳細は
+  [docs/oltw.md](docs/oltw.md)）
 - **freeze（gate 発火）の意味は lock-in の前後で変わる**：
 
 | フェーズ | freeze の挙動 | 理由 |
@@ -564,7 +581,7 @@ Slide left  [manual] measure=17 note=テーマA      ← 人手で ←
 - **lock-in 判定**: confidence ≥ `lock_in_confidence` (0.45) が `lock_in_frames` (30 フレーム
   ≈3 秒) 連続で自動成立（一度立てたら降りない）。「▶ 演奏開始」/ L キーで強制も可能
 - **慣性は live を追い越せない**: frame 駆動 + rate clamp + `max_inertia_seconds` (10s) cap +
-  慣性中の全域探索禁止、の 4 つの構造的安全弁を持つ（詳細は CLAUDE.md）。cap 到達後は
+  慣性中の全域探索禁止、の 4 つの構造的安全弁を持つ（詳細は [docs/oltw.md](docs/oltw.md)）。cap 到達後は
   位置固定になり、手動 → / L で復帰する
 
 ### GUI のモード表示
@@ -656,6 +673,9 @@ CENS は per-frame L2 正規化と短時間平滑で音量差・短時間ジッ�
 `grep 'OLTW' verbose.log | head -50` で起動直後の挙動が追える。`mic=-20dBFS 以上` を確認。
 
 ## プロジェクト構成
+
+「この作業をするならどのファイルか」という観点の逆引きは
+[docs/architecture.md](docs/architecture.md) のコード地図にある。
 
 ```
 audio_score_follower/
