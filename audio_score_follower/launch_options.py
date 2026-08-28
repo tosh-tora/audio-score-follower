@@ -129,7 +129,14 @@ def default_config_dir() -> Path:
     pkg_config = Path(__file__).resolve().parents[1] / "config"
     if pkg_config.is_dir():
         return pkg_config
-    return cwd_config
+    # config/ is gitignored (it holds this operator's own production
+    # config files), so a fresh checkout has neither directory yet.
+    # Still return the absolute repo-root path rather than the bare
+    # relative `cwd_config`: that relative path is exactly the CWD-
+    # dependent behaviour Issue #7 exists to avoid, and callers already
+    # tolerate a config_dir that doesn't exist yet (glob()/exists() on a
+    # missing directory just come back empty).
+    return pkg_config
 
 
 def resolve_input_wav(raw: Optional[Path]) -> Optional[Path]:
