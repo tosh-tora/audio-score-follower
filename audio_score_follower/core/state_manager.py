@@ -20,6 +20,15 @@ class AppState:
     Central state repository for the Sequential Live Follower application.
 
     All state reads/writes are protected by a threading.Lock to prevent race conditions.
+
+    Adding a field: give it a single ``set_xxx()`` mutator that takes the
+    lock, and add it to the dict returned by ``get_all()``. Do not assign
+    to the attribute from outside — writers live on OLTW worker threads
+    and the trigger thread while the GUI polls ``get_all()`` every 100ms,
+    so a bare assignment is an unsynchronised write that also never
+    reaches the GUI. Grouping related fields in one mutator (see
+    ``update_beat_measure`` / ``set_follower_mode``) keeps the snapshot
+    self-consistent instead of letting the poll catch a half-update.
     """
 
     def __init__(self):

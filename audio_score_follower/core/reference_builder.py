@@ -459,7 +459,14 @@ def build_reference(
             written: ``warping_path.npz`` and ``reference_cens.npy``.
         score_bpm: BPM used when synthesising ``score_wav``. Saved into
             the artifact so the runtime can derive score-time → beat
-            without re-parsing the synth.
+            without re-parsing the synth. Keep this a plain resolved
+            value and keep the signature as-is: deciding the BPM (honour
+            ``--score-bpm``, else estimate it from total beats and the
+            reference duration, else error out when ``--score-wav`` was
+            supplied) belongs to the CLI in cli/build_reference.py, which
+            owns the sanity range and the error messages. Teaching this
+            function to estimate would put the same policy in two places
+            and make the builder depend on the reference duration probe.
         feature_config: CENS parameters. None = use defaults. Must match
             what the runtime ``asf-follow`` uses; saved into the npz.
         reference_start_offset_sec: Seconds to trim from the head of the

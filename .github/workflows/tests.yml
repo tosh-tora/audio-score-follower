@@ -1,0 +1,41 @@
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  pytest:
+    # This project is Windows-native (WASAPI loopback, winrt mic-effects
+    # probe, FluidSynth vendor/ layout) — run CI on the same OS the app
+    # actually targets rather than papering over gaps with a Linux runner.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          # synctoolbox and libfmp pin old numpy/pandas/music21/ipython
+          # versions that conflict with this project's modern stack —
+          # install those two without their deps (the numpy-2
+          # incompatibility this creates is monkey-patched in
+          # core/reference_builder.py). ipython and pandas are real
+          # runtime requirements of the libfmp import chain, so install
+          # them normally (with deps) in a separate step, not bundled
+          # into the --no-deps command — bundling them here is what
+          # silently dropped `pandas`/`traitlets` and broke a clean
+          # checkout, see README.md for the corrected sequence.
+          pip install --no-deps synctoolbox libfmp
+          pip install ipython pandas
+
+      - name: Run tests
+        shell: pwsh
+        run: python -m pytest tests/ -q

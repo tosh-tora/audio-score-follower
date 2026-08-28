@@ -2,10 +2,10 @@
 """synth_locator.py - FluidSynth 実行ファイルと SoundFont の検出（唯一の実装）。
 
 以前は tasks/generate_score_wav.py と cli/build_reference.py の両方に
-ほぼ同一の検出ロジックが重複していた。検出順序は実運用でのトラブル履歴に
-基づく（CLAUDE.md 参照）: vendor/ が最優先なのは、LocalAppData に置いた
-実体を Windows Defender / Controlled Folder Access が削除した実例が
-あるため。
+ほぼ同一の検出ロジックが重複していた。検出順を変えるときはこのファイル
+だけを触ること。順序は実運用でのトラブル履歴に基づく: vendor/ が最優先
+なのは、LocalAppData に置いた実体を Windows Defender / Controlled
+Folder Access が削除した実例があるため。
 """
 
 from __future__ import annotations
