@@ -93,10 +93,14 @@ playwright install chromium
 飛ばすと `--slide-url` 起動時にブラウザが開かず、GUI にオレンジの警告バナーが表示される。
 
 **synctoolbox の注意**: 上記 `pip install` で synctoolbox は古い numpy / pandas / music21 を
-要求して解決に失敗することがある (1.4.1 時点)。失敗した場合は `--no-deps` で入れ直す:
+要求して解決に失敗することがある。失敗した場合は synctoolbox / libfmp だけを `--no-deps` で
+入れ直し、その依存先（ipython・pandas）は普通にインストールする（`--no-deps` に含めると
+`libfmp` が実際に import 時点で必要とする `pandas` や `ipython` の依存（`traitlets` 等）まで
+省かれてしまい、クリーンな環境で `ModuleNotFoundError` になる）:
 
 ```powershell
-pip install --no-deps synctoolbox libfmp ipython
+pip install --no-deps synctoolbox libfmp
+pip install ipython pandas
 ```
 
 実行時の numpy 2.x 互換問題は `reference_builder.py` 側でモンキーパッチ済み。

@@ -23,12 +23,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-          # synctoolbox 1.4.1 pins numpy<2 / pandas<2 / music21<6, which
-          # conflict with this project's modern stack — install without
-          # its deps, same as the documented local setup (README.md).
-          # The numpy-2 incompatibility is monkey-patched in
-          # core/reference_builder.py.
-          pip install --no-deps synctoolbox libfmp ipython
+          # synctoolbox and libfmp pin old numpy/pandas/music21/ipython
+          # versions that conflict with this project's modern stack —
+          # install those two without their deps (the numpy-2
+          # incompatibility this creates is monkey-patched in
+          # core/reference_builder.py). ipython and pandas are real
+          # runtime requirements of the libfmp import chain, so install
+          # them normally (with deps) in a separate step, not bundled
+          # into the --no-deps command — bundling them here is what
+          # silently dropped `pandas`/`traitlets` and broke a clean
+          # checkout, see README.md for the corrected sequence.
+          pip install --no-deps synctoolbox libfmp
+          pip install ipython pandas
 
       - name: Run tests
         shell: pwsh

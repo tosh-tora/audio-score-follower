@@ -507,11 +507,17 @@ class TestDefaultConfigDir:
         self, tmp_path, monkeypatch
     ):
         # No config/ under the CWD (the reboot-from-home scenario, Issue #7):
-        # must locate the config/ shipped at the repo root, not return the
-        # empty CWD-relative path.
+        # must resolve to the repo-root config/ path, not the empty
+        # CWD-relative one. config/ itself is gitignored (it holds this
+        # operator's own production files), so on a fresh checkout —
+        # exactly what CI runs against — neither directory exists yet;
+        # the function's contract is an absolute, CWD-independent path,
+        # not that the directory is already populated.
+        import audio_score_follower.launch_options as launch_options_module
+
         monkeypatch.chdir(tmp_path)
         assert not (tmp_path / "config").exists()
         result = default_config_dir()
+        expected = Path(launch_options_module.__file__).resolve().parent.parent / "config"
+        assert result == expected
         assert result.is_absolute()
-        assert result.name == "config"
-        assert result.is_dir()
