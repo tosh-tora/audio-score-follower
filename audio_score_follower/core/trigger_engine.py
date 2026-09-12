@@ -168,8 +168,10 @@ class TriggerEngine:
                 "manual" (user pressed ← / → / Space). Goes into the
                 log line so post-hoc review can tell which advances
                 were the human compensating for tracking drift.
-            trigger: the trigger dict (with measure, note) when known;
-                included in the log for context.
+            trigger: the trigger dict (with measure, note, and the
+                optional author of the note) when known; included in
+                the log for context. ``author`` is appended only when
+                present, so configs without it keep the old log format.
         """
         try:
             self.slide_controller.press(action)
@@ -179,10 +181,12 @@ class TriggerEngine:
             )
             return
         if trigger is not None:
+            author = trigger.get("author") or ""
             logger.info(
-                "Slide %s [%s] measure=%d note=%s",
+                "Slide %s [%s] measure=%d note=%s%s",
                 action, source, trigger.get("measure"),
                 trigger.get("note", ""),
+                f" author={author}" if author else "",
             )
         else:
             logger.info("Slide %s [%s]", action, source)
