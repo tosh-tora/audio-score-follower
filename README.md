@@ -376,7 +376,7 @@ asf-follow
       "built_dir": "../data/built/piece_recording",
       "triggers": [
         {"measure": 1,  "action": "right", "note": "開始"},
-        {"measure": 17, "note": "第二主題（action 省略 → right 扱い）"}
+        {"measure": 17, "note": "第二主題（action 省略 → right 扱い）", "author": "平（指揮）"}
       ]
     }
   ]
@@ -448,7 +448,7 @@ asf-follow
 | `id` | ○ | 楽章番号（任意の整数。順序の識別用）。 |
 | `xml_file` | ○ | MusicXML / MXL ファイルのパス。config ファイルからの相対パス可。 |
 | `built_dir` | ○ | `asf-build` の出力ディレクトリ。 |
-| `triggers` | ○ | スライド操作の定義リスト。`measure`（小節番号）が必須。`action`（`"right"` / `"left"`）は任意で、省略時は `"right"` 扱い。`note` は任意メモ。 |
+| `triggers` | ○ | スライド操作の定義リスト。`measure`（小節番号）が必須。`action`（`"right"` / `"left"`）は任意で、省略時は `"right"` 扱い。`note`（そのスライドの解説文）と `author`（解説を書いた人。例: `"平（指揮）"`）は任意メモで、いずれもスライド操作には影響せず発火ログに出るだけ。 |
 
 ## ライブ操作
 
@@ -540,6 +540,12 @@ OLTW が遅延・先行した場合、人間が ← / → で補正できる。�
 Slide right [auto]   measure=17 note=テーマA      ← OLTW 追従による自動発火
 Slide right [manual] measure=17 note=テーマA      ← 人手で →
 Slide left  [manual] measure=17 note=テーマA      ← 人手で ←
+```
+
+trigger に `author` があれば末尾に付く（無ければ上の書式のまま）：
+
+```
+Slide right [auto]   measure=17 note=テーマA author=平（指揮）
 ```
 
 `grep '\[manual\]\|\[auto\]\|Manual sync\|post-seek catchup\|stuck-rematch\|DP reset'` で

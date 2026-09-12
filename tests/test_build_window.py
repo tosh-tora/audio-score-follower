@@ -109,6 +109,8 @@ def test_generated_config_passes_configloader(tmp_path: Path):
     assert mv["xml_file"] and mv["built_dir"]
     assert mv["triggers"][0]["measure"] == 1
     assert mv["triggers"][0]["action"] == "right"
+    # 任意項目 author は空のプレースホルダとして雛形に出す（手編集の発見性）。
+    assert mv["triggers"][0]["author"] == ""
 
 
 def test_write_config_is_atomic_and_utf8(tmp_path: Path):
