@@ -45,11 +45,17 @@ class ConfigLoader:
               "built_dir": "../data/built/beethoven5_karajan",
               "triggers": [
                 {"measure": 1, "action": "right", "note": "開始"},
-                {"measure": 45, "action": "right", "note": "テーマA"}
+                {"measure": 45, "action": "right", "note": "テーマA",
+                 "author": "平（指揮）"}
               ]
             }
           ]
         }
+
+    ``note`` (解説文) and ``author`` (解説を書いた人) are both optional
+    free text on a trigger: neither is validated, and neither affects
+    slide control — they exist so the operator can tell from the log
+    which annotation fired and who wrote it.
     """
 
     def __init__(self, config_path: str):

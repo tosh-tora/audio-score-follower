@@ -42,3 +42,20 @@ def test_invalid_action_is_rejected(tmp_path):
     config_path = _write_config(tmp_path, [{"measure": 1, "action": "foo"}])
     with pytest.raises(ConfigError):
         ConfigLoader(str(config_path))
+
+
+def test_optional_author_is_preserved(tmp_path):
+    """`author`（解説を書いた人）は任意項目。検証せずそのまま通す。"""
+    config_path = _write_config(
+        tmp_path, [{"measure": 1, "note": "不気味な導入", "author": "平（指揮）"}]
+    )
+    loader = ConfigLoader(str(config_path))
+    trig = loader.movements[0]["triggers"][0]
+    assert trig["author"] == "平（指揮）"
+    assert trig["action"] == "right"
+
+
+def test_author_is_optional(tmp_path):
+    config_path = _write_config(tmp_path, [{"measure": 1, "note": "開始"}])
+    loader = ConfigLoader(str(config_path))
+    assert "author" not in loader.movements[0]["triggers"][0]
