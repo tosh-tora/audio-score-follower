@@ -141,7 +141,8 @@ def generate_config_dict(score: Path, built_dir: Path, config_dir: Path) -> dict
 
     ``xml_file`` / ``built_dir`` are stored relative to ``config_dir`` so
     the generated file matches the project's existing layout. A single
-    measure-1 trigger is scaffolded; the operator edits triggers afterwards.
+    measure-1 trigger is scaffolded (note + empty author placeholder);
+    the operator edits triggers afterwards.
     """
     return {
         "settings": {
@@ -158,6 +159,11 @@ def generate_config_dict(score: Path, built_dir: Path, config_dir: Path) -> dict
                         "measure": 1,
                         "action": "right",
                         "note": "開始（トリガーを編集してください）",
+                        # Optional free text; scaffolded empty so the key is
+                        # visible to an operator editing the file by hand.
+                        # Empty stays out of the fire log (TriggerEngine
+                        # appends author= only when non-empty).
+                        "author": "",
                     }
                 ],
             }
