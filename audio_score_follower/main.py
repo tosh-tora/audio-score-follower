@@ -664,7 +664,6 @@ class AudioScoreFollowerApp:
             logger.info("start pressed but already locked in (no-op)")
             return
         self.oltw.force_lock_in()
-        self.state.mark_manual_adjustment()
         logger.info("Manual lock-in triggered by operator")
 
     def end_performance(self) -> None:
