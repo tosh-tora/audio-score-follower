@@ -127,8 +127,9 @@ class AppState:
         self.slide_controller_warning: Optional[str] = None
 
         # time.monotonic() of the operator's most recent manual correction
-        # (→ / ← / Space slide press, or L force lock-in). The audience
-        # panel flashes 「人が調整！」 for a moment after it. None = never.
+        # (→ / ← / Space slide press). Start / end presses do not count.
+        # The audience panel flashes 「人が調整！」 for a moment after it.
+        # None = never.
         self.manual_adjust_at: Optional[float] = None
 
     def get_all(self) -> dict:
