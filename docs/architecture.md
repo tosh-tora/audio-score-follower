@@ -11,6 +11,7 @@
 ```
 マイク → OLTW 追随 → 小節番号 → トリガー判定 (core/trigger_engine.py)
       → SlideController (Playwright/Chromium) → Google Slides にキー送出
+AppState → ui/audience_panel.py → SlideController → 聴衆向け画面の右パネル
 ```
 
 ## このプロジェクトのコア発想
@@ -37,7 +38,8 @@
 | トリガー発火ループ・手動 →/← オーバライド | `core/trigger_engine.py` |
 | OLTW 結果処理（小節マッピング・AppState 反映・viz push・表示確信度・ジャンプ検出） | `core/result_handler.py`（worker スレッドから毎フレーム呼ばれる） |
 | 楽章ロードの純構築部（失敗は `MovementLoadError`） | `core/movement_loader.py` |
-| Google Slides 自動操作（Playwright、キュー経由の thread-safe キー送出） | `core/slide_controller.py` |
+| 聴衆向け画面（`ui/audience/host.html`: 左に Slides `/embed` の iframe、右に追随パネル）の Playwright 操作。外部モニターへの全画面配置、キュー経由の thread-safe キー送出・パネル更新・1 枚目リセット | `core/slide_controller.py` |
+| 聴衆向けパネルの表示内容（状態判定・確信度 1 秒更新・「人が調整！」）、モニター選択、`/embed` URL 変換（Tk / Playwright 非依存の純ロジック） | `ui/audience_panel.py` |
 | トリガーの小節単位クールダウン | `core/cooldown_timer.py` |
 | FluidSynth / SoundFont 検出の一本化 | `core/synth_locator.py`（**検出順を変えるときはここだけ触る**） |
 | GUI ↔ ワーカースレッド間の atomic 状態 | `core/state_manager.py` (`AppState`) |
