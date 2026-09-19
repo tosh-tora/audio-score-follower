@@ -1,4 +1,4 @@
-# Claude 開発ガイダンス (audio-score-follower-onset)
+# Claude 開発ガイダンス (audio-score-follower)
 
 本番のオーケストラ演奏をマイクでリアルタイム追跡し、指定小節に到達したら Google Slides を自動でページ送りして聴衆向けの解説を表示するシステム。追跡アルゴリズム（OLTW）は手段であり、最終出力はスライド操作。
 
