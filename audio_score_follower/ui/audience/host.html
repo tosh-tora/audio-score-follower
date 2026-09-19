@@ -1,0 +1,82 @@
+<!doctype html>
+<!--
+  Audience screen (Issue #8): Google Slides on the left, tracking panel on
+  the right, in ONE Chromium window driven by core/slide_controller.py.
+  Opened as host.html?src=<.../embed URL>. The page only draws what
+  Python hands to window.asfUpdate(view) — all decisions live in
+  ui/audience_panel.py so they stay testable.
+-->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>audio-score-follower</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #fff; overflow: hidden;
+    font-family: "Meiryo", "Yu Gothic UI", "Noto Sans CJK JP", sans-serif; }
+  #wrap { display: flex; height: 100vh; }
+  /* 1000 / 1280 of the production 1280x800 screen */
+  #slide { width: 78.125vw; height: 100vh; border: 0; display: block; background: #000; }
+  #panel { flex: 1; position: relative; display: flex; flex-direction: column;
+    justify-content: center; align-items: center; gap: 1.5vh; text-align: center; }
+  .label { font-size: 2.6vh; color: #aaa; }
+  .big { font-size: 11vh; font-weight: bold; line-height: 1.05; }
+  .mid { font-size: 7vh; font-weight: bold; line-height: 1.05; }
+  .gap { height: 2vh; }
+  #status { font-size: 3.6vh; font-weight: bold; padding: 0.6vh 1.2vw; border-radius: 0.8vh; }
+  .conf-good { color: #4cff4c; } .conf-mid { color: #ffb020; }
+  .conf-low { color: #ff4c4c; } .conf-none { color: #666; }
+  .st-tracking { background: #0a5c1f; } .st-acquiring { background: #5c4a0a; }
+  .st-lost { background: #7a0e0e; } .st-waiting { background: #333; }
+  #manual { position: absolute; left: 0; right: 0; top: 40%; padding: 2vh 0;
+    background: #ffd400; color: #000; font-size: 4.2vh; font-weight: bold;
+    visibility: hidden; }
+  #manual.on { visibility: visible; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <iframe id="slide" allow="autoplay; fullscreen"></iframe>
+  <div id="panel">
+    <div class="label">小節</div>
+    <div class="big" id="measure">--</div>
+    <div class="label">拍</div>
+    <div class="mid" id="beat">--</div>
+    <div class="gap"></div>
+    <div class="label">確信度</div>
+    <div class="mid conf-none" id="confidence">--</div>
+    <div class="gap"></div>
+    <div id="status" class="st-waiting">待機中</div>
+    <div id="manual">人が調整！</div>
+  </div>
+</div>
+<script>
+  const src = new URLSearchParams(location.search).get("src");
+  const slide = document.getElementById("slide");
+  // Reloading the iframe is how the deck returns to slide 1 (the embed
+  // viewer always opens at the first slide).
+  // asfSlidesLoaded resolves on the iframe's load event; Python awaits it
+  // before focusing the deck.
+  window.asfResetSlides = () => {
+    window.asfSlidesLoaded = new Promise((resolve) =>
+      slide.addEventListener("load", resolve, { once: true }));
+    // The viewer keeps its position in the URL fragment (#slide=...), so
+    // re-assigning the same src could be a same-document fragment hop;
+    // a fresh query value forces a real reload back to slide 1.
+    slide.src = src ? `${src}&_r=${Date.now()}` : "about:blank";
+  };
+  window.asfResetSlides();
+
+  window.asfUpdate = (v) => {
+    document.getElementById("measure").textContent = v.measure;
+    document.getElementById("beat").textContent = v.beat;
+    const conf = document.getElementById("confidence");
+    conf.textContent = v.confidence;
+    conf.className = "mid conf-" + v.confidence_level;
+    const st = document.getElementById("status");
+    st.textContent = v.status;
+    st.className = "st-" + v.status_level;
+    document.getElementById("manual").classList.toggle("on", !!v.manual);
+  };
+</script>
+</body>
+</html>

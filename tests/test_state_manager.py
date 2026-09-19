@@ -88,3 +88,11 @@ def test_display_confidence_setter_and_reset():
     state.set_display_confidence(0.9)
     state.set_movement(movement_id=1, xml_file="x.mxl", triggers=[])
     assert state.get_all()["display_confidence"] == 0.0
+
+
+def test_mark_manual_adjustment_records_monotonic_time():
+    state = AppState()
+    assert state.get_all()["manual_adjust_at"] is None
+    before = time.monotonic()
+    state.mark_manual_adjustment()
+    assert before <= state.get_all()["manual_adjust_at"] <= time.monotonic()
