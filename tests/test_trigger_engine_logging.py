@@ -48,3 +48,12 @@ def test_log_format_unchanged_without_author(caplog):
         engine.execute_action("right", source="auto", trigger={"measure": 1, "note": "開始"})
     assert "Slide right [auto] measure=1 note=開始" in caplog.text
     assert "author=" not in caplog.text
+
+
+def test_manual_action_marks_manual_adjustment():
+    # 聴衆パネルの「人が調整！」は manual の送りでだけ点く
+    engine = _make_engine()
+    engine.execute_action("right", source="auto")
+    assert engine.state.get_all()["manual_adjust_at"] is None
+    engine.execute_action("left", source="manual")
+    assert engine.state.get_all()["manual_adjust_at"] is not None

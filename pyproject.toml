@@ -49,6 +49,9 @@ asf-follow = "audio_score_follower.cli.follow:main"
 where = ["."]
 include = ["audio_score_follower*"]
 
+[tool.setuptools.package-data]
+"audio_score_follower.ui" = ["audience/*.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"

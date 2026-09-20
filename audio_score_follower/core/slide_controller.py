@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-slide_controller.py - Google Slides Browser Automation via Playwright
+slide_controller.py - Audience screen (Google Slides + tracking panel) via Playwright
 
-Owns a Chromium instance running a Google Slides presentation. Key-press
-commands are received from other threads via a Queue and applied to the
-browser page from the dedicated worker thread (sync Playwright is
+Owns a Chromium window showing the audience screen (Issue #8): the local
+page ``ui/audience/host.html`` with the deck in an ``/embed`` iframe on the
+left and the tracking panel on the right. Commands (key presses, panel
+updates, back-to-slide-1) are received from other threads via a Queue and
+applied from the dedicated worker thread (sync Playwright is
 single-threaded by design).
 
 Typical lifecycle::
@@ -13,12 +15,15 @@ Typical lifecycle::
     sc.start()
     sc.wait_ready(timeout=30.0)
     sc.press("right")           # advance one slide
-    sc.press("left")            # go back
+    sc.update_panel(view.to_js())
+    sc.reset_to_first()         # back to slide 1
     sc.stop()
 
-The Chromium window is launched non-headless so the user can drag it to the
-projector monitor and switch to fullscreen (F11). The /present URL form
-auto-enters Google Slides' built-in presentation mode.
+Any URL of the deck works; it is rewritten to ``/embed`` because
+``/present`` refuses to be framed. On startup the window moves to the
+external monitor and goes fullscreen there, leaving the laptop screen to
+the operator console. With no external monitor it stays a normal window
+(rehearsal on a bare laptop).
 
 Action mapping
 --------------
@@ -34,6 +39,13 @@ import logging
 import queue
 import threading
 from typing import Optional
+from urllib.parse import urlencode
+
+from audio_score_follower.ui.audience_panel import (
+    HOST_HTML,
+    pick_presentation_screen,
+    to_embed_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +101,10 @@ class SlideController:
         self._stop_event = threading.Event()
         self._ready_event = threading.Event()
         self._fatal_error: Optional[BaseException] = None
+        # Latest panel view not yet drawn. Only the newest matters, so
+        # update_panel() overwrites it instead of queueing every tick.
+        self._view_lock = threading.Lock()
+        self._pending_view: Optional[dict] = None
 
     # ------------------------------------------------------------------ public
     def start(self) -> None:
@@ -123,6 +139,18 @@ class SlideController:
         key = _KEY_MAP.get(action.lower(), action)
         self._command_queue.put(("press", key))
         logger.debug("Queued key press: %s → %s", action, key)
+
+    def update_panel(self, view: dict) -> None:
+        """Queue a tracking-panel redraw (``PanelView.to_js()``). Non-blocking."""
+        with self._view_lock:
+            already_queued = self._pending_view is not None
+            self._pending_view = view
+        if not already_queued:
+            self._command_queue.put(("panel", None))
+
+    def reset_to_first(self) -> None:
+        """Queue a return to slide 1 (reloads the embed viewer)."""
+        self._command_queue.put(("reset", None))
 
     def stop(self, timeout: float = 5.0) -> None:
         """Signal worker to close the browser and exit."""
@@ -171,25 +199,15 @@ class SlideController:
                 context = browser.new_context(**context_kwargs)
                 page = context.new_page()
 
-                logger.info("Navigating Chromium to slide URL: %s", self.slide_url)
-                # ``domcontentloaded`` is enough for Google Slides; ``load``
-                # can hang waiting for analytics requests.
-                page.goto(self.slide_url, wait_until="domcontentloaded")
-                # Give Slides a moment to set up the presentation viewer and
-                # take keyboard focus.
-                page.wait_for_timeout(1500)
-                # Click once on the slide area so subsequent key events land
-                # on the presentation viewer rather than (e.g.) the URL bar.
-                try:
-                    page.locator("body").click(timeout=2000)
-                except Exception:  # noqa: BLE001 — non-fatal
-                    logger.debug("Initial body click failed; continuing")
+                embed_url = to_embed_url(self.slide_url)
+                host_url = f"{HOST_HTML.as_uri()}?{urlencode({'src': embed_url})}"
+                logger.info("Opening audience screen with slides: %s", embed_url)
+                page.goto(host_url, wait_until="domcontentloaded")
+                self._place_on_projector(context, page)
+                self._wait_slides_loaded(page)
 
                 self._ready_event.set()
-                logger.info(
-                    "SlideController ready. Drag the Chromium window to the "
-                    "projector monitor and press F11 / F5 for fullscreen."
-                )
+                logger.info("SlideController ready.")
 
                 while not self._stop_event.is_set():
                     try:
@@ -202,14 +220,26 @@ class SlideController:
                         break
 
                     op, arg = cmd
-                    if op == "press":
-                        try:
+                    try:
+                        if op == "press":
+                            # Re-focus every time: key events only reach the
+                            # deck while its iframe holds focus.
+                            _focus_slides(page)
                             page.keyboard.press(arg)
                             logger.info("Sent key press: %s", arg)
-                        except Exception as exc:  # noqa: BLE001
-                            logger.error("Key press %s failed: %s", arg, exc, exc_info=True)
-                    else:
-                        logger.warning("Unknown slide controller command: %s", op)
+                        elif op == "panel":
+                            with self._view_lock:
+                                view, self._pending_view = self._pending_view, None
+                            if view is not None:
+                                page.evaluate("v => window.asfUpdate(v)", view)
+                        elif op == "reset":
+                            page.evaluate("() => window.asfResetSlides()")
+                            self._wait_slides_loaded(page)
+                            logger.info("Slides reset to slide 1")
+                        else:
+                            logger.warning("Unknown slide controller command: %s", op)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("Slide command %s %s failed: %s", op, arg, exc, exc_info=True)
 
                 try:
                     context.close()
@@ -224,9 +254,81 @@ class SlideController:
             self._ready_event.set()  # unblock waiters even on failure
             logger.info("SlideController worker exiting")
 
+    @staticmethod
+    def _wait_slides_loaded(page) -> None:
+        """Block until the embed iframe has loaded, then give it focus."""
+        # page.evaluate has no timeout of its own; a load that never fires
+        # (network down) must not hang the worker forever.
+        loaded = page.evaluate(
+            """() => Promise.race([window.asfSlidesLoaded.then(() => true),
+                new Promise(resolve => setTimeout(() => resolve(false), 20000))])"""
+        )
+        if not loaded:
+            logger.warning("スライドの読み込みが 20 秒以内に完了しませんでした")
+        # The viewer builds its slide DOM after the iframe load event.
+        page.wait_for_timeout(1500)
+        _focus_slides(page)
+
+    @staticmethod
+    def _place_on_projector(context, page) -> None:
+        """Move the window to the external monitor and go fullscreen there.
+
+        Launch flags (--kiosk / --start-fullscreen) are ignored under
+        Playwright, so this goes through CDP. getScreenDetails() reports
+        screens in the same DIP coordinates setWindowBounds takes, so
+        Windows display scaling needs no conversion. Non-fatal: on any
+        failure the slides still work in a normal window.
+        """
+        try:
+            cdp = context.new_cdp_session(page)
+            # Pre-grant so Chromium never shows the "manage windows on all
+            # your displays" prompt — nobody is at this window to answer it,
+            # and getScreenDetails() waits on it. browserContextId is
+            # required: without it the grant targets the default context,
+            # not Playwright's, and the prompt still appears intermittently
+            # (Playwright's grant_permissions does not know this permission).
+            context_id = cdp.send("Target.getTargetInfo")["targetInfo"]["browserContextId"]
+            cdp.send("Browser.grantPermissions", {
+                "permissions": ["windowManagement"], "browserContextId": context_id})
+            # Last-resort guard: if the call still never settles, give up
+            # after a few seconds and stay windowed instead of hanging.
+            screens = page.evaluate(
+                """() => Promise.race([
+                    window.getScreenDetails().then(d => d.screens.map(s => ({
+                        left: s.left, top: s.top, width: s.width, height: s.height,
+                        isPrimary: s.isPrimary, isInternal: s.isInternal, label: s.label }))),
+                    new Promise(resolve => setTimeout(() => resolve(null), 5000)),
+                ])"""
+            )
+            if screens is None:
+                logger.warning("モニター情報の取得がタイムアウトしました。全画面にしません")
+                return
+            target = pick_presentation_screen(screens)
+            if target is None:
+                logger.info("外部モニターが見つからないため全画面にしません (screens=%s)", screens)
+                return
+            window_id = cdp.send("Browser.getWindowForTarget")["windowId"]
+            # A maximized window cannot be moved; restore it first.
+            for bounds in (
+                {"windowState": "normal"},
+                {"left": target["left"] + 50, "top": target["top"] + 50,
+                 "width": 800, "height": 600},
+                {"windowState": "fullscreen"},
+            ):
+                cdp.send("Browser.setWindowBounds", {"windowId": window_id, "bounds": bounds})
+            logger.info("Audience screen fullscreen on external monitor: %s", target)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("外部モニターへの全画面表示に失敗しました: %s", exc, exc_info=True)
+
     def __repr__(self) -> str:  # pragma: no cover — debugging aid
         alive = self._thread is not None and self._thread.is_alive()
         return f"SlideController(url={self.slide_url!r}, running={alive})"
+
+
+def _focus_slides(page) -> None:
+    # focus(), never click(): a click inside the embed viewer advances the
+    # deck by one slide.
+    page.locator("#slide").focus()
 
 
 class NullSlideController:
@@ -240,6 +342,12 @@ class NullSlideController:
 
     def stop(self) -> None:
         logger.info("[dry-run] SlideController: stop")
+
+    def update_panel(self, view: dict) -> None:  # noqa: ARG002
+        return None
+
+    def reset_to_first(self) -> None:
+        return None
 
     def press(self, action: str) -> None:
         # No log here — the canonical "slide press" log is emitted by

@@ -180,6 +180,8 @@ class TriggerEngine:
                 "Slide action %s failed [%s]: %s", action, source, exc, exc_info=True
             )
             return
+        if source == "manual":
+            self.state.mark_manual_adjustment()
         if trigger is not None:
             author = trigger.get("author") or ""
             logger.info(

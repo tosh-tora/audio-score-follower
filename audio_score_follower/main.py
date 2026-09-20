@@ -77,6 +77,7 @@ from audio_score_follower.core.state_manager import AppState
 from audio_score_follower.core.trigger_engine import TriggerEngine
 from audio_score_follower.core.viz_feed import VizFeed, VizThresholds
 from audio_score_follower.core.warp_lookup import WarpLookup
+from audio_score_follower.ui.audience_panel import PanelView, build_panel_view
 from audio_score_follower.ui.gui_tkinter import FollowerGUI
 from audio_score_follower.ui.viz_window import VizWindow
 
@@ -86,6 +87,9 @@ logger = logging.getLogger(__name__)
 _GATE_POLL_MS = 50
 # Step size for the operator's runtime silence-threshold nudge (↑/↓ keys).
 _THRESHOLD_STEP_DB = 0.2
+# How often the audience panel is recomputed. Only changed views reach the
+# browser; the confidence number itself refreshes once per second.
+_PANEL_POLL_MS = 200
 
 
 class AudioScoreFollowerApp:
@@ -194,6 +198,9 @@ class AudioScoreFollowerApp:
                 "スライドは操作されません。"
             )
             self.slide_controller = NullSlideController()  # type: ignore[assignment]
+
+        # Last view sent to the audience panel (see _push_audience_panel).
+        self._panel_view: PanelView | None = None
 
         # Tk root + GUI (built before worker so update callbacks have
         # something to push into).
@@ -311,6 +318,7 @@ class AudioScoreFollowerApp:
         self._load_current_movement()
 
         self.trigger_engine.start()
+        self.root.after(_PANEL_POLL_MS, self._push_audience_panel)
 
         if self.input_wav is None and not self.loopback:
             self.root.after(_GATE_POLL_MS, self._check_silence_gate)
@@ -373,12 +381,25 @@ class AudioScoreFollowerApp:
         logger.info("Shutdown complete")
 
     # ---------------------------------------------------- movement loading
-    def _load_current_movement(self) -> None:
+    def _load_current_movement(self) -> bool:
         movement = self.config.get_current_movement()
         if not movement:
             logger.error("No movement available")
-            return
-        self._load_movement(movement)
+            return False
+        return self._load_movement(movement)
+
+    def _push_audience_panel(self) -> None:
+        """Recompute the audience panel and send it when it changed."""
+        try:
+            view = build_panel_view(
+                self.state.get_all(), time.monotonic(), self._panel_view
+            )
+            if self._panel_view is None or view.to_js() != self._panel_view.to_js():
+                self.slide_controller.update_panel(view.to_js())
+            self._panel_view = view
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Audience panel update failed: %s", exc, exc_info=True)
+        self.root.after(_PANEL_POLL_MS, self._push_audience_panel)
 
     def _load_next_movement(self) -> None:
         prev_idx = self.config.current_movement_idx
@@ -710,7 +731,10 @@ class AudioScoreFollowerApp:
             self._load_next_movement()
 
         def _on_r(_e: tk.Event) -> None:
-            self._load_current_movement()
+            # Reload resets the fired-trigger history, so the deck goes back
+            # to slide 1 too (the measure-1 trigger then advances it again).
+            if self._load_current_movement():
+                self.slide_controller.reset_to_first()
 
         def _on_l(_e: tk.Event) -> None:
             self.manual_start()
@@ -764,7 +788,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--slide-url", required=False, default=None,
-        help="Google Slides /present URL。省略するとドライランモード（スライド操作なし）。",
+        help="Google Slides のデッキ URL（/present・/edit・公開 URL のいずれでも可。/embed に自動変換）。"
+             "省略するとドライランモード（スライド操作・聴衆向け画面なし）。",
     )
     parser.add_argument(
         "--input-wav", type=Path, default=None,
