@@ -31,6 +31,10 @@ HOST_HTML = Path(__file__).parent / "audience" / "host.html"
 CONFIDENCE_REFRESH_SEC = 1.0
 # Issue #8: 「人が調整！」 stays up for about a second after a correction.
 MANUAL_FLASH_SEC = 1.0
+# How long the confidence has to stay in the red band before the panel
+# calls it 見失い中. Short dips happen in quiet passages; see
+# docs/calibration.md 「聴衆パネルの状態表示」.
+LOST_CONFIDENCE_SEC = 3.0
 
 
 @dataclass(frozen=True)
@@ -40,14 +44,17 @@ class PanelView:
     confidence: str
     confidence_level: str  # "good" | "mid" | "low" | "none"
     status: str
-    status_level: str      # "tracking" | "acquiring" | "lost" | "waiting"
+    status_level: str  # "tracking" | "checking" | "acquiring" | "lost" | "waiting"
     manual: bool
-    # Not sent to the page: when ``confidence`` was last sampled.
+    # Not sent to the page: when ``confidence`` was last sampled, and
+    # since when it has been in the red band (None = it is not).
     confidence_sampled_at: float = 0.0
+    low_since: Optional[float] = None
 
     def to_js(self) -> dict:
         d = asdict(self)
         d.pop("confidence_sampled_at")
+        d.pop("low_since")
         return d
 
 
@@ -100,6 +107,20 @@ def build_panel_view(
         conf_text, conf_level = _confidence(conf)
         sampled_at = now
 
+    # While tracking, the confidence itself grades the status, so the
+    # audience never sees 「追随中」 next to a red number. The red band
+    # has to persist (LOST_CONFIDENCE_SEC) before we admit to 見失い中.
+    low_since = None
+    if status_level == "tracking":
+        if conf_level == "mid":
+            status, status_level = "確認中", "checking"
+        elif conf_level == "low":
+            low_since = last.low_since if last is not None and last.low_since is not None else now
+            if now - low_since >= LOST_CONFIDENCE_SEC:
+                status, status_level = "見失い中", "lost"
+            else:
+                status, status_level = "確認中", "checking"
+
     adjusted_at = state.get("manual_adjust_at")
     manual = adjusted_at is not None and 0.0 <= now - adjusted_at < MANUAL_FLASH_SEC
 
@@ -112,6 +133,7 @@ def build_panel_view(
         status_level=status_level,
         manual=manual,
         confidence_sampled_at=sampled_at,
+        low_since=low_since,
     )
 
 
