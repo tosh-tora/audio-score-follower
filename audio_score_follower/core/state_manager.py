@@ -15,6 +15,10 @@ from typing import Optional, List
 
 logger = logging.getLogger(__name__)
 
+# Shown as 「前: N 小節目」 in the operator console before any trigger has
+# been passed. Measure 1 is where every movement's deck starts.
+DEFAULT_PREV_TRIGGER_MEASURE = 1
+
 
 class AppState:
     """
@@ -68,8 +72,15 @@ class AppState:
         # Triggers are suppressed and the GUI shows a warning while set.
         self.is_mismatched: bool = False
 
-        # Trigger/cooldown state
+        # Trigger/cooldown state.
+        # ``prev_trigger_measure`` is the last trigger measure at or before
+        # the current position — the operator uses it to reason about which
+        # slide should be up. It starts at (and falls back to)
+        # DEFAULT_PREV_TRIGGER_MEASURE rather than None because the deck
+        # always begins on slide 1; "no trigger passed yet" and "we are at
+        # the opening" are the same thing operationally.
         self.next_trigger_measure: Optional[int] = None
+        self.prev_trigger_measure: int = DEFAULT_PREV_TRIGGER_MEASURE
         self.cooldown_active: bool = False
 
         # OLTW lock-in / inertia state — mirrored from OnlineDTWFollower
@@ -155,6 +166,7 @@ class AppState:
                 'is_mismatched': self.is_mismatched,
                 'cooldown_active': self.cooldown_active,
                 'next_trigger_measure': self.next_trigger_measure,
+                'prev_trigger_measure': self.prev_trigger_measure,
                 'mic_level_db': self.mic_level_db,
                 'silence_gate_active': self.silence_gate_active,
                 'mic_monitor_available': self.mic_monitor_available,
@@ -259,6 +271,7 @@ class AppState:
             self.is_mismatched = False
             self.cooldown_active = False
             self.next_trigger_measure = None
+            self.prev_trigger_measure = DEFAULT_PREV_TRIGGER_MEASURE
             self.performance_ended = False
 
     def set_mic_level(
@@ -366,6 +379,21 @@ class AppState:
         """
         with self._lock:
             self.next_trigger_measure = measure_num
+
+    def set_prev_trigger(self, measure_num: Optional[int]):
+        """
+        Set the most recently passed trigger measure for display.
+
+        Args:
+            measure_num: Measure number of the last trigger at or before
+                the current position, or None when none has been passed
+                yet (falls back to DEFAULT_PREV_TRIGGER_MEASURE so the
+                console shows the opening slide rather than a blank).
+        """
+        with self._lock:
+            self.prev_trigger_measure = (
+                DEFAULT_PREV_TRIGGER_MEASURE if measure_num is None else measure_num
+            )
 
     def activate_cooldown(self, duration_sec: float):
         """

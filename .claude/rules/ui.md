@@ -15,9 +15,12 @@ paths:
 - **無音判定閾値 `silence_threshold_db` は config に保存しない**（マイク・会場依存のセッション値）。永続化するのは `margin_db` だけ
 - `launch_options.py` は Tk / sounddevice を import しない純ロジック層に保つ（ヘッドレステストの前提）
 - GUI は 100ms ポーリング。ウィジェットの pack/forget は状態が変わったときだけ行う
+- **追随状態（待機中 / 曲を捕捉中 / 追随中 / 確認中 / 見失い中）の判定と語は `ui/audience_panel.resolve_status` が正本。** 操作コンソールも聴衆パネルもこれを呼ぶ。操作コンソール側で状態を作り直さない — ピットの画面が「追随中」で客席の画面が「見失い中」という食い違いは、操作者が介入を判断すべきまさにその瞬間に起きる（Issue #51）。操作者にしか要らない情報（復帰キー・慣性の残り秒数）は括弧で足すだけにする
+- **操作コンソールは 1200x800 に収まること。** フォントサイズ・行の追加は縦の予算を食う。「ピットから読めるように」2 倍化した結果 1400x1000 を要求し、実機で最大化してもキーヒントが切れていた実績がある（Issue #51）。`tests/test_gui_layout.py` が最悪ケース（警告バナー 3 種同時）込みで寸法を固定しているので、数字だけ緩めない
+- 長い文字列を出すラベル（ファイル名・警告バナー・キーヒント）は `wraplength` を付け、`FollowerGUI._wrapped_labels` に登録する。付け忘れると横方向に画面外へはみ出す
 
 詳細は [docs/launcher.md](../../docs/launcher.md)、silence gate の状態機械は [docs/oltw.md](../../docs/oltw.md)。
 
 ```bash
-python -m pytest tests/test_launch_options.py tests/test_silence_gate.py tests/test_build_window.py -q
+python -m pytest tests/test_launch_options.py tests/test_silence_gate.py tests/test_build_window.py tests/test_gui_layout.py -q
 ```

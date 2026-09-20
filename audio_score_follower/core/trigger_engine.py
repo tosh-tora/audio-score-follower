@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from audio_score_follower.core.cooldown_timer import CooldownTimer
 from audio_score_follower.core.oltw_follower import OnlineDTWFollower
@@ -110,12 +110,7 @@ class TriggerEngine:
                     time.sleep(interval)
                     continue
 
-                upcoming = [
-                    t["measure"] for t in triggers
-                    if t["measure"] > current_measure
-                    and t["measure"] not in self._fired_trigger_measures
-                ]
-                self.state.set_next_trigger(min(upcoming) if upcoming else None)
+                self._update_trigger_markers(triggers, current_measure)
 
                 # Don't fire until OLTW has locked in.
                 if snapshot["confidence"] < _TRIGGER_CONFIDENCE_FLOOR:
@@ -152,6 +147,30 @@ class TriggerEngine:
                 logger.error("Trigger loop error: %s", exc, exc_info=True)
             time.sleep(interval)
         logger.info("Trigger loop exiting")
+
+    def _update_trigger_markers(
+        self, triggers: List[Dict], current_measure: int
+    ) -> None:
+        """Publish the 前 / 次 trigger measures for the operator console.
+
+        Both markers are derived from the current position; only 「次」
+        additionally skips triggers that already fired (so a trigger on
+        the measure we are sitting in does not re-advertise itself).
+        「前」 deliberately does NOT consult the fired set — after a manual
+        ← the count moves back, and a fired-set reading would keep
+        pointing at a trigger the music is no longer past. None means
+        "nothing passed yet"; AppState renders that as measure 1, where
+        every deck starts.
+        """
+        upcoming = [
+            t["measure"] for t in triggers
+            if t["measure"] > current_measure
+            and t["measure"] not in self._fired_trigger_measures
+        ]
+        self.state.set_next_trigger(min(upcoming) if upcoming else None)
+
+        passed = [t["measure"] for t in triggers if t["measure"] <= current_measure]
+        self.state.set_prev_trigger(max(passed) if passed else None)
 
     def execute_action(
         self,

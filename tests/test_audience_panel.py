@@ -4,8 +4,10 @@ import pytest
 
 from audio_score_follower.core.state_manager import AppState
 from audio_score_follower.ui.audience_panel import (
+    LOST_CONFIDENCE_SEC,
     build_panel_view,
     pick_presentation_screen,
+    resolve_status,
     to_embed_url,
 )
 
@@ -165,3 +167,51 @@ def test_inertia_is_lost_immediately_regardless_of_confidence():
 def test_low_since_is_not_sent_to_the_page():
     v = build_panel_view(_tracking(display_confidence=0.1), now=0.0)
     assert "low_since" not in v.to_js()
+
+
+# ------------------------------------- resolve_status（両画面の共通判定）
+# Issue #51 以降、操作コンソール（ui/gui_tkinter.py）もこの関数を呼ぶ。
+# ここが両画面の表示基準の唯一の正本なので、直接テストしておく。
+
+
+@pytest.mark.parametrize("over, conf_level, expected", [
+    ({"waiting_for_start": True}, "none", "待機中"),
+    ({"performance_ended": True}, "none", "待機中"),
+    ({"is_locked_in": False}, "good", "曲を捕捉中"),
+    ({"is_in_inertia": True}, "good", "見失い中"),
+    ({"is_mismatched": True}, "good", "見失い中"),
+    ({}, "mid", "確認中"),
+    ({}, "good", "追随中"),
+])
+def test_resolve_status_labels(over, conf_level, expected):
+    label, _level, _low = resolve_status(
+        _tracking(**over), conf_level=conf_level, now=0.0
+    )
+    assert label == expected
+
+
+def test_resolve_status_low_confidence_hysteresis():
+    state = _tracking()
+    label, _lvl, low_since = resolve_status(state, conf_level="low", now=100.0)
+    assert label == "確認中" and low_since == 100.0
+
+    label, _lvl, low_since = resolve_status(
+        state, conf_level="low", now=100.0 + LOST_CONFIDENCE_SEC - 0.1,
+        low_since=low_since,
+    )
+    assert label == "確認中"
+
+    label, _lvl, _low = resolve_status(
+        state, conf_level="low", now=100.0 + LOST_CONFIDENCE_SEC,
+        low_since=low_since,
+    )
+    assert label == "見失い中"
+
+
+def test_resolve_status_clears_the_hysteresis_when_confidence_recovers():
+    # 復帰したら low_since を持ち越さない（次の落ち込みで即 見失い中 に
+    # ならないようにするため）
+    _label, _lvl, low_since = resolve_status(
+        _tracking(), conf_level="good", now=100.0, low_since=50.0
+    )
+    assert low_since is None
