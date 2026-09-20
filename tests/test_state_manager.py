@@ -15,7 +15,28 @@ def test_get_all_returns_expected_keys():
             "silence_threshold_db", "waiting_for_start", "is_locked_in",
             "is_in_inertia", "inertia_elapsed_sec", "inertia_cap_sec",
             "movement_id", "xml_file", "movement_number", "total_movements",
-            "total_measures", "load_error"} <= set(snap.keys())
+            "total_measures", "load_error", "prev_trigger_measure"} <= set(snap.keys())
+
+
+def test_prev_trigger_falls_back_to_the_opening_measure():
+    # 操作者は「いまスライドは何枚目か」をこの値から逆算する。まだ 1 つも
+    # トリガーを通過していない状態は「冒頭 = 1 小節目」と同義なので、
+    # None ではなく 1 を出す（GUI 側に空表示のロジックを持たせない）。
+    state = AppState()
+    assert state.get_all()["prev_trigger_measure"] == 1
+
+    state.set_prev_trigger(48)
+    assert state.get_all()["prev_trigger_measure"] == 48
+
+    state.set_prev_trigger(None)
+    assert state.get_all()["prev_trigger_measure"] == 1
+
+
+def test_set_movement_resets_the_prev_trigger_marker():
+    state = AppState()
+    state.set_prev_trigger(48)
+    state.set_movement(movement_id=2, xml_file="b.mxl", triggers=[])
+    assert state.get_all()["prev_trigger_measure"] == 1
 
 
 def test_update_beat_measure_roundtrip():

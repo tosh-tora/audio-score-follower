@@ -50,6 +50,21 @@ CONFIDENCE_GOOD_THRESHOLD = 0.6
 CONFIDENCE_MID_THRESHOLD = 0.4
 
 
+def confidence_level(conf: float) -> str:
+    """Grade a display confidence into "good" / "mid" / "low".
+
+    One implementation so the operator console's colour, the audience
+    panel's colour and the tracking status both screens show are driven
+    by the same breakpoints. The ``>`` comparisons are the historical
+    ones — do not switch them to ``>=`` on one side only.
+    """
+    if conf > CONFIDENCE_GOOD_THRESHOLD:
+        return "good"
+    if conf > CONFIDENCE_MID_THRESHOLD:
+        return "mid"
+    return "low"
+
+
 def pick_font_family(root: tk.Tk) -> str:
     """Return the first available CJK-capable font family for this Tk root."""
     try:
