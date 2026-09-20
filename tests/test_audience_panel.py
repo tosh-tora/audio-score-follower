@@ -126,3 +126,42 @@ def test_to_embed_url(url, expected):
 def test_to_embed_url_rejects_non_slides(url):
     with pytest.raises(ValueError):
         to_embed_url(url)
+
+
+# ------------------------------------------------ 確信度による状態の格下げ
+def test_mid_confidence_shows_checking():
+    v = build_panel_view(_tracking(display_confidence=0.5), now=0.0)
+    assert (v.status, v.status_level) == ("確認中", "checking")
+
+
+def test_low_confidence_becomes_lost_only_after_three_seconds():
+    state = _tracking(display_confidence=0.1)
+    v = build_panel_view(state, now=0.0)
+    assert v.status_level == "checking"
+    for now in (1.0, 2.0, 2.9):
+        v = build_panel_view(state, now=now, last=v)
+        assert v.status_level == "checking", now
+    v = build_panel_view(state, now=3.0, last=v)
+    assert (v.status, v.status_level) == ("見失い中", "lost")
+
+
+def test_recovered_confidence_restarts_the_lost_timer():
+    low, high = _tracking(display_confidence=0.1), _tracking(display_confidence=0.9)
+    v = build_panel_view(low, now=0.0)
+    v = build_panel_view(high, now=1.0, last=v)
+    assert v.status_level == "tracking" and v.low_since is None
+    v = build_panel_view(low, now=2.0, last=v)
+    v = build_panel_view(low, now=4.0, last=v)
+    assert v.status_level == "checking"
+    v = build_panel_view(low, now=5.0, last=v)
+    assert v.status_level == "lost"
+
+
+def test_inertia_is_lost_immediately_regardless_of_confidence():
+    v = build_panel_view(_tracking(is_in_inertia=True, display_confidence=0.9), now=0.0)
+    assert v.status_level == "lost"
+
+
+def test_low_since_is_not_sent_to_the_page():
+    v = build_panel_view(_tracking(display_confidence=0.1), now=0.0)
+    assert "low_since" not in v.to_js()
