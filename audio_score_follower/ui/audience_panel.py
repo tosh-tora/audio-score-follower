@@ -8,6 +8,13 @@ The audience sees one Chromium window: the Google Slides deck (iframe
 lives here so it can be tested headless; the page only draws the view
 dict it is handed (``window.asfUpdate``).
 
+``resolve_status()`` is the SINGLE SOURCE OF TRUTH for the tracking
+status both screens show (Issue #51). The operator console used to grade
+itself — it said 「追随中」 while the audience screen next to it already
+said 「見失い中」, which is exactly the moment the operator has to decide
+whether to intervene. ``ui/gui_tkinter.py`` now calls this and only adds
+operator-facing detail (慣性の残り秒数, 復帰キー) in parentheses.
+
 No Tk / Playwright dependencies (the thresholds import from ui.common
 only pulls in the stdlib tkinter module, no display needed).
 """
@@ -19,10 +26,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
-from audio_score_follower.ui.common import (
-    CONFIDENCE_GOOD_THRESHOLD,
-    CONFIDENCE_MID_THRESHOLD,
-)
+from audio_score_follower.ui.common import confidence_level
 
 HOST_HTML = Path(__file__).parent / "audience" / "host.html"
 
@@ -33,7 +37,7 @@ CONFIDENCE_REFRESH_SEC = 1.0
 MANUAL_FLASH_SEC = 1.0
 # How long the confidence has to stay in the red band before the panel
 # calls it 見失い中. Short dips happen in quiet passages; see
-# docs/calibration.md 「聴衆パネルの状態表示」.
+# docs/calibration.md 「追随状態の表示」.
 LOST_CONFIDENCE_SEC = 3.0
 
 
@@ -58,27 +62,52 @@ class PanelView:
         return d
 
 
-def _status(state: dict) -> tuple[str, str]:
-    # Same precedence as gui_tkinter._update_mode_display, reworded for
-    # the audience.
+def resolve_status(
+    state: dict,
+    *,
+    conf_level: str,
+    now: float,
+    low_since: Optional[float] = None,
+) -> tuple[str, str, Optional[float]]:
+    """Decide the tracking status shown on the audience panel AND the
+    operator console.
+
+    Args:
+        state: an ``AppState.get_all()`` snapshot.
+        conf_level: "good" / "mid" / "low" from
+            ``ui.common.confidence_level``, or "none" while idle.
+        now: ``time.monotonic()``.
+        low_since: the caller's previous ``low_since`` (the monotonic
+            time confidence entered the red band), or None.
+
+    Returns ``(label, level, low_since)``. ``level`` is one of
+    waiting / acquiring / tracking / checking / lost — the caller maps it
+    to its own palette; the LABELS are deliberately identical on both
+    screens so the operator never reads a rosier word than the audience.
+
+    While tracking, the confidence itself grades the status, so neither
+    screen shows 「追随中」 next to a red number. The red band has to
+    persist (LOST_CONFIDENCE_SEC) before we admit to 見失い中 — short dips
+    happen in quiet passages (docs/calibration.md 「追随状態の表示」).
+    """
     if state.get("performance_ended") or state.get("waiting_for_start"):
-        return "待機中", "waiting"
+        return "待機中", "waiting", None
     if not state.get("is_locked_in"):
-        return "曲を捕捉中", "acquiring"
+        return "曲を捕捉中", "acquiring", None
     if state.get("is_in_inertia") or state.get("is_mismatched"):
-        return "見失い中", "lost"
-    return "追随中", "tracking"
+        return "見失い中", "lost", None
+    if conf_level == "mid":
+        return "確認中", "checking", None
+    if conf_level == "low":
+        since = low_since if low_since is not None else now
+        if now - since >= LOST_CONFIDENCE_SEC:
+            return "見失い中", "lost", since
+        return "確認中", "checking", since
+    return "追随中", "tracking", None
 
 
 def _confidence(conf: float) -> tuple[str, str]:
-    # Same breakpoints (and > comparison) as the operator GUI's label.
-    if conf > CONFIDENCE_GOOD_THRESHOLD:
-        level = "good"
-    elif conf > CONFIDENCE_MID_THRESHOLD:
-        level = "mid"
-    else:
-        level = "low"
-    return f"{int(conf * 100)}%", level
+    return f"{int(conf * 100)}%", confidence_level(conf)
 
 
 def build_panel_view(
@@ -90,8 +119,7 @@ def build_panel_view(
     ``last`` is the previously built view; it carries the confidence
     sample so the number only changes every CONFIDENCE_REFRESH_SEC.
     """
-    status, status_level = _status(state)
-    idle = status_level == "waiting"
+    idle = bool(state.get("performance_ended") or state.get("waiting_for_start"))
 
     if idle:
         conf_text, conf_level, sampled_at = "--", "none", now
@@ -107,19 +135,14 @@ def build_panel_view(
         conf_text, conf_level = _confidence(conf)
         sampled_at = now
 
-    # While tracking, the confidence itself grades the status, so the
-    # audience never sees 「追随中」 next to a red number. The red band
-    # has to persist (LOST_CONFIDENCE_SEC) before we admit to 見失い中.
-    low_since = None
-    if status_level == "tracking":
-        if conf_level == "mid":
-            status, status_level = "確認中", "checking"
-        elif conf_level == "low":
-            low_since = last.low_since if last is not None and last.low_since is not None else now
-            if now - low_since >= LOST_CONFIDENCE_SEC:
-                status, status_level = "見失い中", "lost"
-            else:
-                status, status_level = "確認中", "checking"
+    # The status is graded off the SAMPLED confidence level, not the live
+    # one, so the word and the number on this screen always agree.
+    status, status_level, low_since = resolve_status(
+        state,
+        conf_level=conf_level,
+        now=now,
+        low_since=last.low_since if last is not None else None,
+    )
 
     adjusted_at = state.get("manual_adjust_at")
     manual = adjusted_at is not None and 0.0 <= now - adjusted_at < MANUAL_FLASH_SEC

@@ -57,3 +57,39 @@ def test_manual_action_marks_manual_adjustment():
     assert engine.state.get_all()["manual_adjust_at"] is None
     engine.execute_action("left", source="manual")
     assert engine.state.get_all()["manual_adjust_at"] is not None
+
+
+def test_trigger_markers_follow_the_current_measure():
+    # 「前 / 次のトリガー」表示（Issue #51）。どちらも現在位置から導出する。
+    engine = _make_engine()
+    triggers = [{"measure": 1}, {"measure": 17}, {"measure": 48}]
+
+    engine._update_trigger_markers(triggers, current_measure=1)
+    snap = engine.state.get_all()
+    assert snap["prev_trigger_measure"] == 1
+    assert snap["next_trigger_measure"] == 17
+
+    engine._update_trigger_markers(triggers, current_measure=20)
+    snap = engine.state.get_all()
+    assert snap["prev_trigger_measure"] == 17
+    assert snap["next_trigger_measure"] == 48
+
+    # 最終トリガーを過ぎたら「次」は無し、「前」は最後のトリガーのまま
+    engine._update_trigger_markers(triggers, current_measure=60)
+    snap = engine.state.get_all()
+    assert snap["prev_trigger_measure"] == 48
+    assert snap["next_trigger_measure"] is None
+
+
+def test_prev_marker_moves_back_with_a_manual_rewind():
+    # 手動 ← で小節が戻ったら「前」も戻る。fired set 由来にすると通過して
+    # いないトリガーを指し続けてしまう（この挙動がその防波堤）。
+    engine = _make_engine()
+    triggers = [{"measure": 1}, {"measure": 17}, {"measure": 48}]
+    engine._fired_trigger_measures.update({1, 17})
+
+    engine._update_trigger_markers(triggers, current_measure=20)
+    assert engine.state.get_all()["prev_trigger_measure"] == 17
+
+    engine._update_trigger_markers(triggers, current_measure=5)
+    assert engine.state.get_all()["prev_trigger_measure"] == 1
