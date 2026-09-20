@@ -10,6 +10,7 @@ mechanism.
 
 import logging
 import threading
+import time
 from typing import Optional, List
 
 logger = logging.getLogger(__name__)
@@ -125,6 +126,12 @@ class AppState:
         # timeout). None = no warning to show. Set once at startup.
         self.slide_controller_warning: Optional[str] = None
 
+        # time.monotonic() of the operator's most recent manual correction
+        # (→ / ← / Space slide press). Start / end presses do not count.
+        # The audience panel flashes 「人が調整！」 for a moment after it.
+        # None = never.
+        self.manual_adjust_at: Optional[float] = None
+
     def get_all(self) -> dict:
         """
         Atomically get snapshot of all state.
@@ -162,6 +169,7 @@ class AppState:
                 'is_in_inertia': self.is_in_inertia,
                 'inertia_elapsed_sec': self.inertia_elapsed_sec,
                 'inertia_cap_sec': self.inertia_cap_sec,
+                'manual_adjust_at': self.manual_adjust_at,
             }
 
     def update_beat_measure(
@@ -293,6 +301,11 @@ class AppState:
         """
         with self._lock:
             self.performance_ended = bool(ended)
+
+    def mark_manual_adjustment(self) -> None:
+        """Record that the operator just corrected the follower by hand."""
+        with self._lock:
+            self.manual_adjust_at = time.monotonic()
 
     def set_awaiting_first_sound(
         self, awaiting: bool, timeout_sec: float = 0.0
