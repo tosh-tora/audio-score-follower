@@ -32,6 +32,39 @@
     background: #ffd400; color: #000; font-size: 4.2vh; font-weight: bold;
     visibility: hidden; }
   #manual.on { visibility: visible; }
+  /* Berlioz: the face only mirrors v.status_level / v.manual — it never
+     grades the status itself (resolve_status is the single source, #51).
+     Read from the back of a hall, so: a status-coloured disc, thick lines,
+     big symbols. Motion is the "attention" cue, so the healthy states
+     (incl. tracking) stay still. No prefers-reduced-motion opt-out: with
+     Windows' "Animation effects" off it would silently freeze every face
+     on the show PC (it did in the prototype). */
+  #berlioz { height: 20vh; width: 20vh; overflow: visible; }
+  #berlioz .mood { display: none; }
+  #berlioz .body { transform-box: view-box; }
+  #berlioz text { font-weight: 900; stroke: #1a0e08; stroke-width: 4px;
+    paint-order: stroke; text-anchor: middle; }
+  #berlioz[data-mood="waiting"] .mood-waiting,
+  #berlioz[data-mood="acquiring"] .mood-acquiring,
+  #berlioz[data-mood="tracking"] .mood-tracking,
+  #berlioz[data-mood="checking"] .mood-checking,
+  #berlioz[data-mood="lost"] .mood-lost,
+  #berlioz[data-mood="manual"] .mood-manual { display: inline; }
+  #berlioz[data-mood="waiting"] .disc { fill: #6b6b6b; }
+  #berlioz[data-mood="acquiring"] .disc { fill: #b8860b; }
+  #berlioz[data-mood="tracking"] .disc { fill: #1fa84a; }
+  #berlioz[data-mood="checking"] .disc { fill: #f0a500; }
+  #berlioz[data-mood="lost"] .disc { fill: #e03030; }
+  #berlioz[data-mood="manual"] .disc { fill: #ffd400; }
+  #berlioz[data-mood="checking"] .body { animation: asf-sway 2.5s ease-in-out infinite;
+    transform-origin: 100px 190px; }
+  #berlioz[data-mood="lost"] .body { animation: asf-shake 0.5s linear infinite; }
+  #berlioz[data-mood="manual"] .body { animation: asf-pop 0.5s ease-in-out infinite;
+    transform-origin: 100px 104px; }
+  @keyframes asf-sway { 0%, 100% { transform: rotate(-6deg); } 50% { transform: rotate(6deg); } }
+  @keyframes asf-shake { 0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
+  @keyframes asf-pop { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.1); } }
 </style>
 </head>
 <body>
@@ -46,6 +79,77 @@
     <div class="label">確信度</div>
     <div class="mid conf-none" id="confidence">--</div>
     <div class="gap"></div>
+    <svg id="berlioz" data-mood="waiting" viewBox="0 0 200 200" aria-hidden="true"
+      stroke="#1a0e08" stroke-linecap="round" stroke-linejoin="round">
+      <circle class="disc" cx="100" cy="104" r="96" stroke="none"/>
+      <g class="body">
+        <path d="M70 170 q30 18 60 0 l8 26 h-76z" fill="#1d1d3a" stroke-width="4"/>
+        <path d="M100 172 l-22 12 l22 -3 l22 3z" fill="#fff" stroke-width="3"/>
+        <g fill="#c0561c" stroke-width="4">
+          <circle cx="48" cy="72" r="30"/><circle cx="40" cy="106" r="26"/>
+          <circle cx="50" cy="138" r="22"/><circle cx="64" cy="44" r="26"/>
+          <circle cx="96" cy="32" r="28"/><circle cx="130" cy="38" r="26"/>
+          <circle cx="156" cy="64" r="28"/><circle cx="162" cy="100" r="26"/>
+          <circle cx="152" cy="134" r="22"/>
+        </g>
+        <!-- same curls again without outline, so the hair reads as one mass -->
+        <g fill="#c0561c" stroke="none">
+          <circle cx="48" cy="72" r="28"/><circle cx="40" cy="106" r="24"/>
+          <circle cx="50" cy="138" r="20"/><circle cx="64" cy="44" r="24"/>
+          <circle cx="96" cy="32" r="26"/><circle cx="130" cy="38" r="24"/>
+          <circle cx="156" cy="64" r="26"/><circle cx="162" cy="100" r="24"/>
+          <circle cx="152" cy="134" r="20"/>
+        </g>
+        <ellipse cx="100" cy="108" rx="44" ry="54" fill="#f6d2b0" stroke-width="5"/>
+        <path d="M58 80 q20 -36 54 -28 q22 4 30 26 q-26 -14 -42 -6 q-20 -8 -42 8z"
+          fill="#c0561c" stroke-width="4"/>
+
+        <g class="mood mood-waiting">
+          <path d="M66 98 q14 10 28 0 M106 98 q14 10 28 0 M68 80 h24 M108 80 h24 M90 136 q10 5 20 0"
+            fill="none" stroke-width="6"/>
+          <text x="166" y="58" font-size="58" fill="#ddd">z</text>
+        </g>
+        <g class="mood mood-acquiring">
+          <path d="M66 72 q12 -12 26 -4 M108 80 h24" fill="none" stroke-width="6"/>
+          <circle cx="80" cy="98" r="12" fill="#fff" stroke-width="4"/>
+          <circle cx="120" cy="98" r="12" fill="#fff" stroke-width="4"/>
+          <circle cx="86" cy="95" r="6" fill="#1a0e08"/><circle cx="126" cy="95" r="6" fill="#1a0e08"/>
+          <circle cx="100" cy="138" r="7" fill="#1a0e08"/>
+          <text x="166" y="58" font-size="58" fill="#ffe08a">?</text>
+        </g>
+        <g class="mood mood-tracking">
+          <path d="M68 78 q12 -10 24 0 M108 78 q12 -10 24 0 M66 102 q14 -16 28 0 M106 102 q14 -16 28 0"
+            fill="none" stroke-width="6"/>
+          <path d="M78 126 q22 34 44 0 z" fill="#8a1c1c" stroke-width="5"/>
+          <text x="30" y="58" font-size="46" fill="#b9ffb9">♪</text>
+          <text x="166" y="58" font-size="58" fill="#b9ffb9">♫</text>
+        </g>
+        <g class="mood mood-checking">
+          <path d="M68 76 L92 84 M108 84 L132 76 M82 138 q6 -8 12 0 t12 0 t12 0"
+            fill="none" stroke-width="6"/>
+          <circle cx="80" cy="100" r="12" fill="#fff" stroke-width="4"/>
+          <circle cx="120" cy="100" r="12" fill="#fff" stroke-width="4"/>
+          <circle cx="80" cy="102" r="5" fill="#1a0e08"/><circle cx="120" cy="102" r="5" fill="#1a0e08"/>
+          <path d="M152 70 q-14.4 24 0 31.2 q14.4 -7.2 0 -31.2z" fill="#6ec8ff" stroke-width="3"/>
+        </g>
+        <g class="mood mood-lost">
+          <path d="M66 72 L92 84 M108 84 L134 72 M70 92 l18 8 l-18 8 M130 92 l-18 8 l18 8"
+            fill="none" stroke-width="6"/>
+          <ellipse cx="100" cy="140" rx="14" ry="12" fill="#8a1c1c" stroke-width="5"/>
+          <text x="166" y="58" font-size="58" fill="#ffb0b0">?</text>
+          <path d="M40 72 q-13 22 0 28.6 q13 -6.6 0 -28.6z" fill="#6ec8ff" stroke-width="3"/>
+          <path d="M154 96 q-12 20 0 26 q12 -6 0 -26z" fill="#6ec8ff" stroke-width="3"/>
+        </g>
+        <g class="mood mood-manual">
+          <path d="M66 66 q13 -12 26 0 M108 66 q13 -12 26 0" fill="none" stroke-width="6"/>
+          <circle cx="80" cy="98" r="15" fill="#fff" stroke-width="4"/>
+          <circle cx="120" cy="98" r="15" fill="#fff" stroke-width="4"/>
+          <circle cx="80" cy="98" r="5" fill="#1a0e08"/><circle cx="120" cy="98" r="5" fill="#1a0e08"/>
+          <ellipse cx="100" cy="142" rx="10" ry="14" fill="#8a1c1c" stroke-width="5"/>
+          <text x="166" y="58" font-size="58" fill="#ffd400">!</text>
+        </g>
+      </g>
+    </svg>
     <div id="status" class="st-waiting">待機中</div>
     <div id="manual">人が調整！</div>
   </div>
@@ -77,6 +181,7 @@
     st.textContent = v.status;
     st.className = "st-" + v.status_level;
     document.getElementById("manual").classList.toggle("on", !!v.manual);
+    document.getElementById("berlioz").dataset.mood = v.manual ? "manual" : v.status_level;
   };
 </script>
 </body>
