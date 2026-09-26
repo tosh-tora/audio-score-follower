@@ -42,12 +42,93 @@ from audio_score_follower.core.mic_effects_probe import (
     SOUND_SETTINGS_URI,
     probe_capture_effects,
 )
-from audio_score_follower.ui.common import apply_base_style
+from audio_score_follower.ui.common import apply_base_style, attach_help, help_icon
 
 logger = logging.getLogger(__name__)
 
-_WINDOW_GEOMETRY = "760x840"
+# No fixed geometry: the window takes its requested size so rows that
+# appear later (NC result, sound-settings button, errors) grow it instead
+# of being clipped. A fixed 760x840 once hid the right ~200px of the form.
+# Sizes are in points ("p") so they scale with the fonts on high-DPI
+# screens — raw pixels made the label column overlap its controls at 200%.
+# Long status texts wrap so the requested width stays bounded: full-width
+# rows vs. rows that start at the control column.
+_WRAP_FULL = "520p"
+_WRAP_FIELD = "380p"
+# Aligns the label column across sections (widest: the loopback radio).
+_LABEL_COL_MINSIZE = "165p"
 _DEFAULT_DEVICE_LABEL = "既定のデバイス"
+_MEASURE_IDLE_TEXT = "未測定 — 本番前にステージが無音の状態で測定してください"
+_HINT_FG = "#777"
+
+# Hover/click explanations for each setting ("?" badge + the label itself).
+# What the setting does and when to touch it — the numbers behind the
+# defaults live in docs/calibration.md, CLI/config mapping in README.md.
+_HELP = {
+    "config": (
+        "追随に使う設定ファイル（楽譜・ビルド結果・トリガ定義）。\n"
+        "config/内のJSONを最近使った順に並べています。ここでの選択内容は"
+        "［開始］時にこのconfigに保存され、次回また復元されます。"
+    ),
+    "mic": (
+        "本番の標準モード。選んだマイクの音で演奏を追随します。\n"
+        "無音測定・ノイズキャンセル検知も常にこのマイクで行います。"
+        "（CLI:既定/ settings.mic_device）"
+    ),
+    "loopback": (
+        "PCが再生している音（YouTube・DAWなど）をそのまま取り込んで追随します。"
+        "リハーサルや動作確認用。Windows (WASAPI)専用です。\n"
+        "無音判定は使われません。（CLI: --loopback / --loopback-device）"
+    ),
+    "wav": (
+        "録音ファイルを入力にして追随します。別演奏でのカバレッジ確認用。\n"
+        "無音判定は使われません。（CLI: --input-wav）"
+    ),
+    "play_audio": (
+        "音源ファイルを追随と同時にスピーカーで再生します。"
+        "耳で追随のずれを確かめたいときに。（CLI: --play-audio）"
+    ),
+    "slide_url": (
+        "ページ送りするGoogleスライドのURL。開始すると左にスライド・"
+        "右に追随パネルを並べた聴衆向け画面が開きます。\n"
+        "空欄ならドライラン（スライドを操作せず追随だけ行う）。（CLI: --slide-url）"
+    ),
+    "silence": (
+        "マイク音量がこの値(dBFS)以下の間は追随を一時停止します"
+        "（フェルマータ・休符・曲間で位置が流れないように）。\n"
+        "マイクと会場の暗騒音で変わるためconfigには保存されません。"
+        "本番のたびに［無音測定］で決めてください。起動後も操作画面の−/＋（↑/↓キー）で調整できます。"
+    ),
+    "measure": (
+        "押すと測定開始、もう一度押すと終了（2秒以上）。ステージが無音"
+        "（暗騒音だけ）の状態で測り、無音判定閾値を自動設定します。\n"
+        "入力ソースに関係なく、マイク欄のデバイスで測定します。"
+    ),
+    "margin": (
+        "無音測定で求めた閾値に足す余白(dB)。このconfigに保存されます。\n"
+        "弱音の出だしで追随が始まりにくい会場では小さく（0や負も可）、"
+        "客席の雑音で誤って動き出す会場では大きくします。"
+    ),
+    "nc": (
+        "選択中のマイクにWindowsのノイズ抑制（オーディオの拡張）が"
+        "掛かっていないか調べます。掛かっていると追随精度が黙って落ちます。\n"
+        "検出されたら［サウンド設定を開く］から手動でオフにしてください。"
+        "マイク内蔵のDSPや仮想マイクは完全には検出できません。"
+    ),
+    "cooldown": (
+        "スライドを送ったあと、次の送りを受け付けるまでの最短間隔（秒）。"
+        "近接したトリガの連続発火を防ぎます。（config: cooldown_seconds）"
+    ),
+    "verbose": "ログをDEBUGレベルで出力します。不具合の調査用。（CLI: -v）",
+    "viz": (
+        "特徴量と確信度の内訳をリアルタイム表示する別ウィンドウを開きます。"
+        "追随の調子を詳しく見たいとき用で、本番では通常オフ。（CLI: --viz）"
+    ),
+    "build": (
+        "楽譜(MusicXML)と参照演奏の録音から、追随に必要なデータと"
+        "config.jsonを作成する画面を開きます。新しい曲を準備するときに使います。"
+    ),
+}
 # Poll interval for the silence-threshold measurement. The monitor's RMS
 # block is 1024/16000 ≈ 64ms, so 60ms samples each block roughly once.
 _MEASURE_POLL_MS = 60
@@ -187,7 +268,6 @@ class _LauncherWindow:
         self.result: Optional[LaunchOptions] = None
 
         root.title("audio-score-follower ランチャー")
-        root.geometry(_WINDOW_GEOMETRY)
         self._font, self._font_small = apply_base_style(root)
 
         self._config_paths: list[Path] = []
@@ -197,172 +277,217 @@ class _LauncherWindow:
         self._measure_samples: list[float] = []
         self._build_widgets()
         self._refresh_config_list()
+        root.update_idletasks()
+        root.minsize(root.winfo_reqwidth(), root.winfo_reqheight())
         root.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
     # ------------------------------------------------------------ widgets
+    def _section(self, body: ttk.Frame, title: str) -> ttk.LabelFrame:
+        frm = ttk.LabelFrame(body, text=title, padding=(10, 2, 10, 6))
+        frm.pack(fill="x", pady=(0, 6))
+        frm.columnconfigure(0, minsize=_LABEL_COL_MINSIZE)
+        frm.columnconfigure(1, weight=1)
+        return frm
+
+    def _help(self, parent: tk.Widget, row: int, key: str, *targets: tk.Widget) -> None:
+        """Place the "?" badge in the last column and hover-help on targets."""
+        help_icon(parent, _HELP[key]).grid(row=row, column=3, sticky="e", padx=(6, 0))
+        attach_help(_HELP[key], *targets)
+
+    def _hint(self, parent: tk.Widget, text: str = "") -> ttk.Label:
+        return ttk.Label(
+            parent, text=text, foreground=_HINT_FG, font=self._font_small,
+            wraplength=_WRAP_FIELD, justify="left",
+        )
+
+    def _spin_cell(
+        self, parent: tk.Widget, row: int, var: tk.StringVar, unit: str,
+        from_: float, to: float, increment: float,
+    ) -> None:
+        cell = ttk.Frame(parent)
+        cell.grid(row=row, column=1, sticky="w", pady=1)
+        ttk.Spinbox(
+            cell, textvariable=var, from_=from_, to=to, increment=increment, width=8,
+        ).pack(side="left")
+        ttk.Label(cell, text=unit).pack(side="left", padx=(6, 0))
+
     def _build_widgets(self) -> None:
-        pad = {"padx": 10, "pady": 4}
-        body = ttk.Frame(self.root, padding=10)
+        # Vertical budget: the whole form must fit a 1280x800 screen
+        # (tests/test_gui_layout.py). Add rows to an existing section
+        # rather than a new section — each LabelFrame costs ~45px.
+        row_pad = {"pady": 1}
+        body = ttk.Frame(self.root, padding=(16, 10, 16, 12))
         body.pack(fill="both", expand=True)
 
         # --- config file -------------------------------------------------
-        frm_cfg = ttk.LabelFrame(body, text="設定ファイル (config.json)")
-        frm_cfg.pack(fill="x", **pad)
+        frm_cfg = self._section(body, "設定ファイル")
         self.var_config = tk.StringVar()
         self.combo_config = ttk.Combobox(
-            frm_cfg, textvariable=self.var_config, state="readonly", width=60
+            frm_cfg, textvariable=self.var_config, state="readonly", width=40
         )
-        self.combo_config.pack(side="left", fill="x", expand=True, padx=8, pady=6)
+        self.combo_config.grid(row=0, column=0, columnspan=2, sticky="we", **row_pad)
         self.combo_config.bind("<<ComboboxSelected>>", self._on_config_selected)
-        ttk.Button(frm_cfg, text="参照…", command=self._on_browse_config).pack(
-            side="left", padx=8, pady=6
+        ttk.Button(frm_cfg, text="参照…", command=self._on_browse_config).grid(
+            row=0, column=2, sticky="we", padx=(6, 0), **row_pad
         )
-        self.label_config_error = ttk.Label(body, text="", foreground="#c00")
-        self.label_config_error.pack(fill="x", padx=10)
+        self._help(frm_cfg, 0, "config", self.combo_config)
+        self.label_config_error = ttk.Label(
+            frm_cfg, text="", foreground="#c00", font=self._font_small,
+            wraplength=_WRAP_FULL, justify="left",
+        )
+        self.label_config_error.grid(row=1, column=0, columnspan=4, sticky="w")
+        self.label_config_error.grid_remove()  # shown by _set_config_error
 
         # --- input source ------------------------------------------------
-        frm_src = ttk.LabelFrame(body, text="入力ソース")
-        frm_src.pack(fill="x", **pad)
+        frm_src = self._section(body, "入力ソース")
         self.var_source = tk.StringVar(value=INPUT_SOURCE_MIC)
 
-        # mic row
-        ttk.Radiobutton(
+        radio_mic = ttk.Radiobutton(
             frm_src, text="マイク", variable=self.var_source,
             value=INPUT_SOURCE_MIC, command=self._on_source_changed,
-        ).grid(row=0, column=0, sticky="w", padx=8, pady=4)
+        )
+        radio_mic.grid(row=0, column=0, sticky="w", **row_pad)
         self.pick_mic = _DevicePicker(frm_src, list_input_devices(), _DEFAULT_DEVICE_LABEL)
-        self.pick_mic.widget.grid(row=0, column=1, sticky="we", padx=8, pady=4)
+        self.pick_mic.widget.grid(row=0, column=1, columnspan=2, sticky="we", **row_pad)
+        self._help(frm_src, 0, "mic", radio_mic)
 
-        # loopback row
-        ttk.Radiobutton(
+        radio_loop = ttk.Radiobutton(
             frm_src, text="ループバック (PC出力)", variable=self.var_source,
             value=INPUT_SOURCE_LOOPBACK, command=self._on_source_changed,
-        ).grid(row=1, column=0, sticky="w", padx=8, pady=4)
+        )
+        radio_loop.grid(row=1, column=0, sticky="w", **row_pad)
         self.pick_loopback = _DevicePicker(
             frm_src, list_output_devices_wasapi(), "既定の出力デバイス"
         )
-        self.pick_loopback.widget.grid(row=1, column=1, sticky="we", padx=8, pady=4)
+        self.pick_loopback.widget.grid(
+            row=1, column=1, columnspan=2, sticky="we", **row_pad
+        )
+        self._help(frm_src, 1, "loopback", radio_loop)
 
-        # wav row
-        ttk.Radiobutton(
+        radio_wav = ttk.Radiobutton(
             frm_src, text="音源ファイル", variable=self.var_source,
             value=INPUT_SOURCE_WAV, command=self._on_source_changed,
-        ).grid(row=2, column=0, sticky="w", padx=8, pady=4)
-        frm_wav = ttk.Frame(frm_src)
-        frm_wav.grid(row=2, column=1, sticky="we", padx=8, pady=4)
+        )
+        radio_wav.grid(row=2, column=0, sticky="w", **row_pad)
         self.var_wav = tk.StringVar()
-        self.entry_wav = ttk.Entry(frm_wav, textvariable=self.var_wav, width=42)
-        self.entry_wav.pack(side="left", fill="x", expand=True)
-        self.button_wav = ttk.Button(frm_wav, text="参照…", command=self._on_browse_wav)
-        self.button_wav.pack(side="left", padx=6)
+        self.entry_wav = ttk.Entry(frm_src, textvariable=self.var_wav, width=30)
+        self.entry_wav.grid(row=2, column=1, sticky="we", **row_pad)
+        self.button_wav = ttk.Button(frm_src, text="参照…", command=self._on_browse_wav)
+        self.button_wav.grid(row=2, column=2, sticky="we", padx=(6, 0), **row_pad)
+        self._help(frm_src, 2, "wav", radio_wav)
+
         self.var_play_audio = tk.BooleanVar(value=False)
         self.check_play_audio = ttk.Checkbutton(
-            frm_src, text="同時に再生する (--play-audio)",
-            variable=self.var_play_audio,
+            frm_src, text="同時に再生する", variable=self.var_play_audio,
         )
-        self.check_play_audio.grid(row=3, column=1, sticky="w", padx=8, pady=2)
-        frm_src.columnconfigure(1, weight=1)
+        self.check_play_audio.grid(row=3, column=1, columnspan=2, sticky="w", **row_pad)
+        self._help(frm_src, 3, "play_audio", self.check_play_audio)
 
         if not self.pick_mic.devices or not self.pick_loopback.devices:
             ttk.Label(
                 frm_src,
                 text="デバイス一覧を取得できませんでした — 番号または名前を直接入力してください",
-                foreground="#c60", font=self._font_small,
-            ).grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=2)
+                foreground="#c60", font=self._font_small, wraplength=_WRAP_FULL,
+            ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
-        # --- slide url ---------------------------------------------------
-        frm_url = ttk.LabelFrame(body, text="スライド URL (--slide-url)")
-        frm_url.pack(fill="x", **pad)
-        self.var_slide_url = tk.StringVar()
-        ttk.Entry(frm_url, textvariable=self.var_slide_url).pack(
-            fill="x", padx=8, pady=4
-        )
-        ttk.Label(
-            frm_url, text="空欄 = ドライラン（スライド操作なし）",
-            foreground="#888", font=self._font_small,
-        ).pack(anchor="w", padx=8, pady=(0, 4))
-
-        # --- tuning / verbose ---------------------------------------------
-        frm_adv = ttk.LabelFrame(body, text="詳細設定")
-        frm_adv.pack(fill="x", **pad)
-        ttk.Label(frm_adv, text="無音判定閾値 (dBFS・毎回測定):").grid(
-            row=0, column=0, sticky="w", padx=8, pady=4
-        )
+        # --- silence gate / mic check -------------------------------------
+        frm_sil = self._section(body, "無音検出・マイク確認")
+        label_silence = ttk.Label(frm_sil, text="無音判定閾値")
+        label_silence.grid(row=0, column=0, sticky="w", **row_pad)
         self.var_silence = tk.StringVar(value=str(DEFAULT_SILENCE_THRESHOLD_DB))
-        ttk.Spinbox(
-            frm_adv, textvariable=self.var_silence,
-            from_=-120.0, to=0.0, increment=1.0, width=8,
-        ).grid(row=0, column=1, sticky="w", padx=8, pady=4)
+        self._spin_cell(frm_sil, 0, self.var_silence, "dBFS", -120.0, 0.0, 1.0)
         self.button_measure = ttk.Button(
-            frm_adv, text="無音測定", command=self._on_toggle_measure
+            frm_sil, text="無音測定", command=self._on_toggle_measure
         )
-        self.button_measure.grid(row=0, column=2, sticky="w", padx=8, pady=4)
-        self.label_measure = ttk.Label(
-            frm_adv,
-            text=("無音（暗騒音のみ）の状態でマイクから測定し、閾値を自動設定します"
-                  "（マイク・会場依存のため config には保存されません。毎回測定してください）"),
-            foreground="#888", font=self._font_small,
-        )
-        self.label_measure.grid(
-            row=1, column=0, columnspan=3, sticky="w", padx=8
-        )
+        self.button_measure.grid(row=0, column=2, sticky="we", padx=(6, 0), **row_pad)
+        self._help(frm_sil, 0, "silence", label_silence)
+        attach_help(_HELP["measure"], self.button_measure)
+        # Status line for the measurement (live level / result / errors).
+        self.label_measure = self._hint(frm_sil, _MEASURE_IDLE_TEXT)
+        self.label_measure.grid(row=1, column=1, columnspan=3, sticky="w")
+
         # 測定マージン (Issue #41): 無音測定の閾値式に足す余白。式は
         # median + (median - p10) + margin。会場で閾値が高すぎ/低すぎと
         # 感じたときに操作者が調整・保存できる。
-        ttk.Label(frm_adv, text="無音測定マージン (dB):").grid(
-            row=2, column=0, sticky="w", padx=8, pady=4
-        )
+        label_margin = ttk.Label(frm_sil, text="無音測定マージン")
+        label_margin.grid(row=2, column=0, sticky="w", **row_pad)
         self.var_margin = tk.StringVar(value=str(DEFAULT_SILENCE_MARGIN_DB))
-        ttk.Spinbox(
-            frm_adv, textvariable=self.var_margin,
-            from_=-20.0, to=20.0, increment=0.5, width=8,
-        ).grid(row=2, column=1, sticky="w", padx=8, pady=4)
-        ttk.Label(
-            frm_adv,
-            text="無音測定の閾値に足す余白。小さくすると弱音でも開始しやすくなる",
-            foreground="#888", font=self._font_small,
-        ).grid(row=3, column=0, columnspan=3, sticky="w", padx=8)
+        self._spin_cell(frm_sil, 2, self.var_margin, "dB", -20.0, 20.0, 0.5)
+        self._help(frm_sil, 2, "margin", label_margin)
+
+        frm_nc = ttk.Frame(frm_sil)
+        frm_nc.grid(row=4, column=0, columnspan=3, sticky="w", **row_pad)
         self.button_check_nc = ttk.Button(
-            frm_adv, text="マイクのノイズキャンセル検知", command=self._on_check_nc
+            frm_nc, text="マイクのノイズキャンセル検知", command=self._on_check_nc
         )
-        self.button_check_nc.grid(row=4, column=0, sticky="w", padx=8, pady=4)
-        self.label_nc = ttk.Label(
-            frm_adv, text="", font=self._font_small, wraplength=680, justify="left",
-        )
-        self.label_nc.grid(row=5, column=0, columnspan=3, sticky="w", padx=8)
+        self.button_check_nc.pack(side="left")
+        # Packed next to the check button only when NC is detected.
         self.button_open_sound_settings = ttk.Button(
-            frm_adv, text="サウンド設定を開く", command=self._on_open_sound_settings,
+            frm_nc, text="サウンド設定を開く", command=self._on_open_sound_settings,
         )
         self._nc_settings_button_visible = False
-
-        ttk.Label(frm_adv, text="トリガ間隔 cooldown_seconds (秒):").grid(
-            row=6, column=0, sticky="w", padx=8, pady=4
+        self._help(frm_sil, 4, "nc", self.button_check_nc)
+        self.label_nc = ttk.Label(
+            frm_sil, text="", font=self._font_small, wraplength=_WRAP_FULL, justify="left",
         )
+        self.label_nc.grid(row=5, column=0, columnspan=4, sticky="w")
+        self.label_nc.grid_remove()  # shown once a check has run
+
+        # --- slide / behaviour ---------------------------------------------
+        frm_url = self._section(body, "スライド・動作")
+        label_url = ttk.Label(frm_url, text="スライド URL")
+        label_url.grid(row=0, column=0, sticky="w", **row_pad)
+        self.var_slide_url = tk.StringVar()
+        entry_url = ttk.Entry(frm_url, textvariable=self.var_slide_url, width=30)
+        entry_url.grid(row=0, column=1, columnspan=2, sticky="we", **row_pad)
+        self._help(frm_url, 0, "slide_url", label_url)
+        self._hint(frm_url, "空欄 = ドライラン（スライド操作なし）").grid(
+            row=1, column=1, columnspan=2, sticky="w"
+        )
+
+        label_cooldown = ttk.Label(frm_url, text="トリガ間隔")
+        label_cooldown.grid(row=2, column=0, sticky="w", **row_pad)
         self.var_cooldown = tk.StringVar(value="3.0")
-        ttk.Spinbox(
-            frm_adv, textvariable=self.var_cooldown,
-            from_=0.0, to=60.0, increment=0.5, width=8,
-        ).grid(row=6, column=1, sticky="w", padx=8, pady=4)
+        self._spin_cell(frm_url, 2, self.var_cooldown, "秒", 0.0, 60.0, 0.5)
+        self._help(frm_url, 2, "cooldown", label_cooldown)
+
+        # Debug toggles share one row (vertical budget); their "?" badges
+        # sit inline instead of in the help column.
+        frm_dbg = ttk.Frame(frm_url)
+        frm_dbg.grid(row=3, column=0, columnspan=4, sticky="w", **row_pad)
         self.var_verbose = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            frm_adv, text="詳細ログ (-v)", variable=self.var_verbose
-        ).grid(row=7, column=0, sticky="w", padx=8, pady=4)
         self.var_viz = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            frm_adv, text="特徴量・確信度モニタを開く (--viz)", variable=self.var_viz
-        ).grid(row=8, column=0, columnspan=2, sticky="w", padx=8, pady=4)
+        for text, var, key in (
+            ("詳細ログ", self.var_verbose, "verbose"),
+            ("特徴量・確信度モニタを開く", self.var_viz, "viz"),
+        ):
+            check = ttk.Checkbutton(frm_dbg, text=text, variable=var)
+            check.pack(side="left")
+            attach_help(_HELP[key], check)
+            help_icon(frm_dbg, _HELP[key]).pack(side="left", padx=(4, 24))
 
         # --- buttons -------------------------------------------------------
+        ttk.Separator(body).pack(fill="x", pady=(0, 8))
         frm_btn = ttk.Frame(body)
-        frm_btn.pack(fill="x", pady=12)
-        self.button_start = ttk.Button(frm_btn, text="開始", command=self._on_start)
-        self.button_start.pack(side="right", padx=10, ipadx=20)
-        ttk.Button(frm_btn, text="キャンセル", command=self._on_cancel).pack(
-            side="right", padx=10
+        frm_btn.pack(fill="x")
+        ttk.Style(self.root).configure(
+            "Start.TButton", font=(self._font[0], 12, "bold"), padding=(18, 4)
         )
-        ttk.Button(
+        self.button_start = ttk.Button(
+            frm_btn, text="開始", style="Start.TButton", command=self._on_start
+        )
+        self.button_start.pack(side="right")
+        ttk.Button(frm_btn, text="キャンセル", command=self._on_cancel).pack(
+            side="right", padx=(0, 8)
+        )
+        button_build = ttk.Button(
             frm_btn, text="オフラインビルドを作成…", command=self._on_open_build
-        ).pack(side="left", padx=10)
+        )
+        button_build.pack(side="left")
+        attach_help(_HELP["build"], button_build)
+        self._hint(frm_btn, "ⓘ にマウスを載せると説明が出ます").pack(
+            side="left", padx=(12, 0)
+        )
 
         self._on_source_changed()
 
@@ -385,10 +510,18 @@ class _LauncherWindow:
             self.var_config.set(str(paths[0]))
             self._on_config_selected()
         else:
-            self.label_config_error.configure(
-                text=f"{self.config_dir}/ に JSON がありません。参照から選択してください"
+            self._set_config_error(
+                f"{self.config_dir}/ に JSON がありません。参照から選択してください"
             )
             self.button_start.configure(state="disabled")
+
+    def _set_config_error(self, text: str) -> None:
+        # Hidden while empty so the blank row does not eat vertical space.
+        self.label_config_error.configure(text=text)
+        if text:
+            self.label_config_error.grid()
+        else:
+            self.label_config_error.grid_remove()
 
     def _current_config_path(self) -> Optional[Path]:
         raw = self.var_config.get().strip()
@@ -417,10 +550,10 @@ class _LauncherWindow:
         try:
             saved = read_launcher_settings(path)
         except (ValueError, OSError) as exc:
-            self.label_config_error.configure(text=f"{path.name}: {exc}")
+            self._set_config_error(f"{path.name}: {exc}")
             self.button_start.configure(state="disabled")
             return
-        self.label_config_error.configure(text="")
+        self._set_config_error("")
         self.button_start.configure(state="normal")
 
         self.var_source.set(saved["input_source"])
@@ -536,7 +669,7 @@ class _LauncherWindow:
         self._measure_monitor = None
         monitor.stop()
         self.button_measure.configure(text="無音測定")
-        self.label_measure.configure(text="")
+        self.label_measure.configure(text=_MEASURE_IDLE_TEXT, foreground=_HINT_FG)
 
     # ---------------------------------------------- noise-suppression check
     def _on_check_nc(self) -> None:
@@ -550,6 +683,7 @@ class _LauncherWindow:
         """
         self.button_check_nc.configure(state="disabled")
         self.label_nc.configure(text="確認中…", foreground="#555")
+        self.label_nc.grid()
         self.root.update_idletasks()
         try:
             report = probe_capture_effects(self.pick_mic.value())
@@ -567,12 +701,10 @@ class _LauncherWindow:
 
         show_settings_button = report.has_noise_suppression
         if show_settings_button and not self._nc_settings_button_visible:
-            self.button_open_sound_settings.grid(
-                row=4, column=1, columnspan=2, sticky="w", padx=8, pady=4
-            )
+            self.button_open_sound_settings.pack(side="left", padx=(8, 0))
             self._nc_settings_button_visible = True
         elif not show_settings_button and self._nc_settings_button_visible:
-            self.button_open_sound_settings.grid_forget()
+            self.button_open_sound_settings.pack_forget()
             self._nc_settings_button_visible = False
 
     def _on_open_sound_settings(self) -> None:

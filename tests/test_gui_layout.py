@@ -206,3 +206,73 @@ def test_low_confidence_needs_the_hysteresis_before_it_says_lost(root, monkeypat
     clock["t"] += 3.0
     gui._render_follower_mode(snapshot)
     assert "見失い中" in gui.label_mode.cget("text")
+
+
+# ------------------------------------------------------ 起動ランチャー
+# 固定 760x840 の geometry に対して中身が幅 ~950px を要求し、右端（無音
+# 測定マージン欄など）が黙って切れていた。ランチャーは要求サイズで開く
+# ので、要求サイズそのものを想定画面に収める。
+
+_LONG_DEVICE = "マイク配列 (Realtek(R) Audio) — 非常に長いデバイス名 " * 3
+
+
+def _build_launcher(root, tmp_path, monkeypatch):
+    from audio_score_follower.ui import launcher
+
+    monkeypatch.setattr(
+        launcher, "list_input_devices",
+        lambda: [(i, _LONG_DEVICE, f"{i}: {_LONG_DEVICE} [MME]") for i in range(3)],
+    )
+    monkeypatch.setattr(
+        launcher, "list_output_devices_wasapi",
+        lambda: [(9, _LONG_DEVICE, f"9: {_LONG_DEVICE} [WASAPI]")],
+    )
+    # 空の config_dir → エラー行が出る状態（最悪ケースの 1 つ）
+    return launcher._LauncherWindow(root, tmp_path)
+
+
+def test_launcher_fits_the_target_screen_in_the_worst_case(root, tmp_path, monkeypatch):
+    win = _build_launcher(root, tmp_path, monkeypatch)
+    # 実際に出る文言のうち最長のもの（mic_effects_probe.headline_ja /
+    # _finish_measure）を長いデバイス名で出す。
+    win.label_nc.configure(text=(
+        f"⚠ ノイズ抑制ソフトの仮想マイクの可能性があります（{_LONG_DEVICE}）"
+        "— 物理マイクを直接選択してください"
+    ))
+    win.label_nc.grid()
+    win.button_open_sound_settings.pack(side="left", padx=(8, 0))
+    win.label_measure.configure(text=(
+        "閾値を -48.3 dBFS に設定しました (中央値 -52.1 / p10 -55.9 / "
+        "マージン +2.0 / n=1200)"
+    ))
+    win.var_config.set("C:/" + "very_long_directory_name/" * 8 + "config.json")
+    root.update_idletasks()
+
+    req_w, req_h = root.winfo_reqwidth(), root.winfo_reqheight()
+    assert req_w <= SCREEN_W, f"ランチャーの必要幅 {req_w}px が {SCREEN_W}px を超える"
+    # タイトルバー・タスクバーぶんの余白を残す
+    assert req_h <= SCREEN_H - 40, f"ランチャーの必要高さ {req_h}px が画面に収まらない"
+
+
+def test_every_launcher_help_badge_has_text(root, tmp_path, monkeypatch):
+    from audio_score_follower.ui import launcher
+
+    _build_launcher(root, tmp_path, monkeypatch)
+    assert all(text.strip() for text in launcher._HELP.values())
+
+
+def test_tooltip_shows_on_hover_and_hides_on_leave(root):
+    from audio_score_follower.ui.common import Tooltip
+
+    button = tk.Button(root, text="x")
+    button.pack()
+    root.update_idletasks()
+    tip = Tooltip(button, "説明", delay_ms=0)
+    tip.show()
+    assert tip.tip is not None and tip.tip.winfo_exists()
+    tip.hide()
+    assert tip.tip is None
+    tip.toggle()
+    assert tip.tip is not None
+    tip.toggle()
+    assert tip.tip is None
