@@ -4,6 +4,7 @@ import pytest
 
 from audio_score_follower.core.state_manager import AppState
 from audio_score_follower.ui.audience_panel import (
+    HOST_HTML,
     LOST_CONFIDENCE_SEC,
     build_panel_view,
     pick_presentation_screen,
@@ -31,6 +32,21 @@ def _tracking(**over):
 ])
 def test_status_level(over, level):
     assert build_panel_view(_tracking(**over), now=0.0).status_level == level
+
+
+def test_every_status_level_has_a_berlioz_face():
+    # host.html が顔を描き忘れた level では、ベルリオーズの顔が空白になる
+    levels = {
+        resolve_status(_tracking(**over), conf_level=conf, now=10.0, low_since=0.0)[1]
+        for over in ({"waiting_for_start": True}, {"is_locked_in": False},
+                     {"is_in_inertia": True}, {})
+        for conf in ("good", "mid", "low")
+    }
+    assert levels == {"waiting", "acquiring", "lost", "tracking", "checking"}
+    html = HOST_HTML.read_text(encoding="utf-8")
+    for mood in levels | {"manual"}:
+        assert f'class="mood mood-{mood}"' in html, mood
+        assert f'[data-mood="{mood}"] .disc' in html, mood
 
 
 def test_waiting_hides_numbers():
