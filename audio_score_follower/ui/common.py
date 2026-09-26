@@ -102,3 +102,114 @@ def apply_base_style(
     ttk.Style(target).configure(".", font=base_font)
     target.option_add("*Font", base_font)
     return base_font, small_font
+
+
+_TOOLTIP_BG = "#fffbe6"
+_TOOLTIP_BORDER = "#c9b870"
+
+
+class Tooltip:
+    """Hover popup explaining a widget (launcher settings help).
+
+    Shown ``delay_ms`` after the pointer enters the widget and destroyed
+    on leave / click, so it never lingers over the control the operator
+    is about to use. ``show()`` / ``hide()`` are public so a help icon
+    can also toggle it on click (touch screens have no hover).
+    """
+
+    def __init__(
+        self, widget: tk.Widget, text: str, *,
+        delay_ms: int = 400, wraplength: str = "320p",
+    ) -> None:
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self.wraplength = wraplength
+        self.tip: Optional[tk.Toplevel] = None
+        self._after_id: Optional[str] = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+        widget.bind("<ButtonPress>", self.hide, add="+")
+
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        self._after_id = self.widget.after(self.delay_ms, self.show)
+
+    def _cancel(self) -> None:
+        if self._after_id is not None:
+            self.widget.after_cancel(self._after_id)
+            self._after_id = None
+
+    def show(self) -> None:
+        self._cancel()
+        if self.tip is not None or not self.widget.winfo_exists():
+            return
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        tip.attributes("-topmost", True)
+        tk.Label(
+            tip, text=self.text, justify="left", wraplength=self.wraplength,
+            background=_TOOLTIP_BG, foreground="#222",
+            highlightthickness=1, highlightbackground=_TOOLTIP_BORDER,
+            padx=10, pady=6, font=_small_font_of(self.widget),
+        ).pack()
+        tip.update_idletasks()
+        # Below the widget and inside its window (the help badges sit at
+        # the right edge, so right-align the tip to them there), then
+        # clamped to the screen; flips above the widget at the bottom.
+        x = self.widget.winfo_rootx()
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        w, h = tip.winfo_reqwidth(), tip.winfo_reqheight()
+        window = self.widget.winfo_toplevel()
+        if x + w > window.winfo_rootx() + window.winfo_width():
+            x = self.widget.winfo_rootx() + self.widget.winfo_width() - w
+        sw, sh = tip.winfo_screenwidth(), tip.winfo_screenheight()
+        x = max(0, min(x, sw - w - 4))
+        if y + h > sh:
+            y = max(0, self.widget.winfo_rooty() - h - 4)
+        tip.wm_geometry(f"+{x}+{y}")
+        self.tip = tip
+
+    def hide(self, _event=None) -> None:
+        self._cancel()
+        if self.tip is not None:
+            self.tip.destroy()
+            self.tip = None
+
+    def toggle(self, _event=None) -> None:
+        if self.tip is None:
+            self.show()
+        else:
+            self.hide()
+
+
+def _small_font_of(widget: tk.Misc):
+    """The 10pt variant of the option-database font apply_base_style set."""
+    base = widget.option_get("font", "Font")
+    try:
+        family = font.Font(root=widget, font=base).actual("family") if base else None
+    except tk.TclError:
+        family = None
+    return (family, 10) if family else "TkDefaultFont"
+
+
+def help_icon(parent: tk.Widget, text: str) -> ttk.Label:
+    """Small "?" badge that explains the setting next to it on hover/click."""
+    small = _small_font_of(parent)
+    ttk.Style(parent).configure(
+        "Help.TLabel", foreground="#3a6db5",
+        font=(small[0], 13) if isinstance(small, tuple) else small,
+        padding=(2, 0),
+    )
+    icon = ttk.Label(parent, text="ⓘ", style="Help.TLabel", cursor="question_arrow")
+    tooltip = Tooltip(icon, text, delay_ms=150)
+    # Replaces Tooltip's click-to-hide binding: on the icon a click is
+    # the touch-screen way to open the explanation.
+    icon.bind("<ButtonPress>", tooltip.toggle)
+    return icon
+
+
+def attach_help(text: str, *widgets: tk.Widget) -> None:
+    """Attach the same hover explanation to each of ``widgets``."""
+    for w in widgets:
+        Tooltip(w, text)
