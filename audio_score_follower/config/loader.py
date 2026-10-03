@@ -22,6 +22,11 @@ class ConfigError(ValueError):
     """Raised when config.json has a syntax error or invalid structure."""
 
 
+def is_video_movement(movement: Dict) -> bool:
+    """A movement whose triggers play scene videos (validated: all or none)."""
+    return any("video" in t for t in movement.get("triggers", []))
+
+
 class ConfigLoader:
     """Parses and manages config.json.
 
@@ -48,9 +53,21 @@ class ConfigLoader:
                 {"measure": 45, "action": "right", "note": "テーマA",
                  "author": "平（指揮）"}
               ]
+            },
+            {
+              "id": 3,
+              "built_dir": "../data/built/fantastique3",
+              "triggers": [
+                {"measure": 1, "video": "scenes/01_millet.mp4", "note": "ミレー"}
+              ]
             }
           ]
         }
+
+    ``video`` makes the trigger play that scene video (path relative to
+    this file, resolved to an absolute path here) instead of pressing a
+    key on the deck. A movement is all-video or all-slides; the audience
+    screen switches between the two when the movement loads.
 
     ``note`` (解説文) and ``author`` (解説を書いた人) are both optional
     free text on a trigger: neither is validated, and neither affects
@@ -130,6 +147,15 @@ class ConfigLoader:
             if not isinstance(triggers, list):
                 raise ConfigError(f"{mv}.triggers: リスト形式が必要です")
 
+            # A movement drives either the Slides deck or the video layer,
+            # never both: the audience screen shows one of them at a time.
+            with_video = sum(1 for t in triggers if "video" in t)
+            if 0 < with_video < len(triggers):
+                raise ConfigError(
+                    f"{mv}.triggers: 'video' 付きと無しのトリガーが混在しています。"
+                    f"1 楽章はスライドか動画のどちらか一方にしてください"
+                )
+
             for t_idx, trig in enumerate(triggers):
                 tp = f"{mv}.triggers[{t_idx}]"
 
@@ -145,6 +171,17 @@ class ConfigLoader:
                         f"(got {trig['measure']!r})"
                     )
 
+                if "video" in trig:
+                    if "action" in trig:
+                        raise ConfigError(
+                            f"{tp}: 'video' と 'action' は同時に指定できません"
+                        )
+                    video = Path(self.resolve_path(str(trig["video"])))
+                    if not video.is_file():
+                        raise ConfigError(f"{tp}.video: ファイルが見つかりません: {video}")
+                    trig["video"] = str(video)
+                    continue
+
                 action = trig.get("action", "right")
                 if action not in _VALID_ACTIONS:
                     raise ConfigError(
@@ -154,6 +191,10 @@ class ConfigLoader:
                 trig["action"] = action
 
         logger.debug("Config validation passed (%d movements)", len(self.movements))
+
+    def has_video_movements(self) -> bool:
+        """True when any movement plays scene videos instead of the deck."""
+        return any(is_video_movement(m) for m in self.movements)
 
     def get_current_movement(self) -> Optional[Dict]:
         if self.current_movement_idx < len(self.movements):
