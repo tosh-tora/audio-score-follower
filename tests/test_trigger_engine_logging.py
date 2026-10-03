@@ -93,3 +93,76 @@ def test_prev_marker_moves_back_with_a_manual_rewind():
 
     engine._update_trigger_markers(triggers, current_measure=5)
     assert engine.state.get_all()["prev_trigger_measure"] == 1
+
+
+# ---- video movements -----------------------------------------------------
+
+class _FakeVideoController(_FakeSlideController):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def play_video(self, path, next_path=None):
+        self.calls.append(("play", path, next_path))
+
+    def hold_video_end(self, path):
+        self.calls.append(("hold", path))
+
+
+_SCENES = [
+    {"measure": 1, "video": "/s/01.mp4"},
+    {"measure": 20, "video": "/s/02.mp4"},
+    {"measure": 41, "video": "/s/03.mp4"},
+]
+
+
+def _make_video_engine():
+    engine = _make_engine()
+    engine.slide_controller = _FakeVideoController()
+    engine.state.set_movement(
+        movement_id=3, xml_file="x.mxl", triggers=_SCENES, total_measures=100
+    )
+    return engine
+
+
+def test_video_trigger_plays_its_own_scene_and_preloads_the_next():
+    # 「次のファイル」ではなく発火したトリガー自身の動画。小節が飛んで
+    # 途中のトリガーが発火しなくても後続のシーンがずれない
+    engine = _make_video_engine()
+    engine.execute_action("right", source="auto", trigger=_SCENES[1])
+    assert engine.slide_controller.calls == [("play", "/s/02.mp4", "/s/03.mp4")]
+    assert engine.slide_controller.presses == []
+
+
+def test_last_scene_has_nothing_to_preload():
+    engine = _make_video_engine()
+    engine.execute_action("right", source="auto", trigger=_SCENES[2])
+    assert engine.slide_controller.calls == [("play", "/s/03.mp4", None)]
+
+
+def test_manual_back_holds_the_previous_scene_end():
+    # ← はシーン 2 を取り消し、シーン 1 の最終フレームで静止（再再生しない）
+    engine = _make_video_engine()
+    engine.execute_action("left", source="manual", trigger=_SCENES[1])
+    assert engine.slide_controller.calls == [("hold", "/s/01.mp4")]
+
+
+def test_manual_back_from_the_first_scene_goes_black():
+    engine = _make_video_engine()
+    engine.execute_action("left", source="manual", trigger=_SCENES[0])
+    assert engine.slide_controller.calls == [("hold", None)]
+
+
+def test_bare_key_in_a_video_movement_is_ignored():
+    # 消費するトリガーが無い →/← はキーを隠れたデッキに送らない
+    engine = _make_video_engine()
+    engine.execute_action("right", source="manual")
+    assert engine.slide_controller.calls == []
+    assert engine.slide_controller.presses == []
+
+
+def test_video_name_appears_in_the_fire_log(caplog):
+    engine = _make_video_engine()
+    with caplog.at_level(logging.INFO):
+        engine.execute_action("right", source="auto", trigger=_SCENES[0])
+    assert "measure=1 note= video=01.mp4" in caplog.text
