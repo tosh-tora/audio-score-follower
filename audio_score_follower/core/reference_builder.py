@@ -30,7 +30,10 @@ Inputs:
 
 Outputs (saved into ``output_dir``):
     warping_path.npz   - keys:
-                            ref_times    (K,) float32 — sec on reference
+                            ref_times    (K,) float32 — sec on the ORIGINAL
+                                                     reference (head trim re-added)
+                            reference_start_offset_sec  float — that head trim;
+                                                     WarpLookup.load subtracts it
                             score_times  (K,) float32 — sec on synth
                             score_bpm           float  — synth tempo
                                                           (average when a
@@ -585,10 +588,10 @@ def build_reference(
     frame_to_sec = 1.0 / _ALIGN_FEATURE_RATE
     score_times = (wp[0].astype(np.float64) * frame_to_sec).astype(np.float32)
     ref_times = (wp[1].astype(np.float64) * frame_to_sec).astype(np.float32)
-    # Re-add the trimmed offset to ref_times so callers reason in the
-    # *original* recording timeline. (The OLTW at runtime operates on
-    # the trimmed CENS — but if the user replays the original WAV they
-    # expect ref_time to match the original timestamps.)
+    # Re-add the trimmed offset to ref_times so the artifact reads in the
+    # *original* recording timeline. The runtime operates on the trimmed
+    # CENS, so WarpLookup.load() subtracts reference_start_offset_sec
+    # (persisted below) again — keep the two in sync.
     if reference_start_offset_sec > 0:
         ref_times = ref_times + reference_start_offset_sec
 
@@ -606,6 +609,7 @@ def build_reference(
         ref_times=ref_times,
         score_times=score_times,
         score_bpm=np.float32(score_bpm),
+        reference_start_offset_sec=np.float64(reference_start_offset_sec),
         **({} if tempo_map is None else {
             "tempo_map_beats": np.asarray(tempo_map[0], dtype=np.float64),
             "tempo_map_seconds": np.asarray(tempo_map[1], dtype=np.float64),

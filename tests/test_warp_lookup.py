@@ -207,3 +207,39 @@ def test_non_increasing_tempo_map_raises():
             feature_config=FeatureConfig(),
             tempo_map=(np.array([0.0, 4.0, 4.0]), np.array([0.0, 1.0, 2.0])),
         )
+
+
+def _save_warp(path, *, offset_in_npz=None):
+    cfg = FeatureConfig()
+    extra = {} if offset_in_npz is None else {
+        "reference_start_offset_sec": np.float64(offset_in_npz)}
+    np.savez(
+        path / "warping_path.npz",
+        # Original-recording timeline: music starts 2 s in (head trimmed).
+        ref_times=np.array([2.0, 12.0], dtype=np.float32),
+        score_times=np.array([0.0, 10.0], dtype=np.float32),
+        score_bpm=np.float32(60.0),
+        **extra,
+        **cfg.to_npz_arrays(),
+    )
+
+
+def test_load_shifts_ref_axis_to_trimmed_cens_timeline(tmp_path):
+    """The follower's ref_time is frame/rate on the head-trimmed CENS, so
+    ref_time 0 must be the first score beat — not 2 s (= ~1.5 beats of
+    幻想1's Largo) earlier. Seeks round-trip on the same axis."""
+    _save_warp(tmp_path, offset_in_npz=2.0)
+    lookup = WarpLookup.load(tmp_path)
+    assert lookup.ref_to_beat(0.0) == pytest.approx(0.0)
+    assert lookup.ref_to_beat(5.0) == pytest.approx(5.0)
+    assert lookup.beat_to_ref_time(5.0) == pytest.approx(5.0)
+
+
+def test_load_reads_offset_from_build_meta_for_older_builds(tmp_path):
+    import json
+
+    _save_warp(tmp_path)
+    (tmp_path / "build_meta.json").write_text(
+        json.dumps({"reference_start_offset_sec": 2.0}), encoding="utf-8")
+    lookup = WarpLookup.load(tmp_path)
+    assert lookup.ref_to_beat(5.0) == pytest.approx(5.0)

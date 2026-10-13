@@ -70,7 +70,17 @@ class WarpLookup:
 
     @classmethod
     def load(cls, built_dir: Path) -> "WarpLookup":
-        """Load a previously built warp path from a directory."""
+        """Load a previously built warp path from a directory.
+
+        The loaded ref axis is the **trimmed reference CENS timeline** —
+        frame / feature_rate, exactly what the follower reports as
+        ``ref_time_sec`` and what ``trigger_engine`` seeks in. The npz
+        stores ref_times on the *original* recording timeline (the
+        builder re-adds ``reference_start_offset_sec``), so that offset
+        is subtracted here. Without this every lookup lagged by the head
+        trim (幻想1: 1.997s ≈ 1.5 beats of the Largo) and every manual
+        seek landed the same amount too far ahead.
+        """
         npz_path = built_dir / "warping_path.npz"
         if not npz_path.exists():
             raise FileNotFoundError(
@@ -81,11 +91,17 @@ class WarpLookup:
         cfg = FeatureConfig.from_npz_arrays(
             data["feature_config"], data["feature_config_quant_steps"]
         )
+        # Builds before the offset was stored in the npz only have it in
+        # the build_meta.json sidecar (written by the same builder call).
+        if "reference_start_offset_sec" in data.files:
+            start_offset = float(data["reference_start_offset_sec"])
+        else:
+            start_offset = _start_offset_from_meta(built_dir)
         tempo_map = None
         if "tempo_map_beats" in data.files:
             tempo_map = (data["tempo_map_beats"], data["tempo_map_seconds"])
         return cls(
-            ref_times=data["ref_times"],
+            ref_times=data["ref_times"].astype(np.float64) - start_offset,
             score_times=data["score_times"],
             score_bpm=float(data["score_bpm"]),
             feature_config=cfg,
@@ -277,6 +293,21 @@ class WarpLookup:
             f"bpm={self.score_bpm:.1f}"
             f"{', tempo_map' if self.tempo_map is not None else ''})"
         )
+
+
+def _start_offset_from_meta(built_dir: Path) -> float:
+    import json
+
+    meta_path = built_dir / "build_meta.json"
+    if not meta_path.exists():
+        logger.warning(
+            "build_meta.json not found in %s — assuming no reference head "
+            "trim. If the build trimmed the head, measures will lag.",
+            built_dir,
+        )
+        return 0.0
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    return float(meta.get("reference_start_offset_sec", 0.0) or 0.0)
 
 
 def _interp_extrapolate(x: float, xp: np.ndarray, fp: np.ndarray) -> float:

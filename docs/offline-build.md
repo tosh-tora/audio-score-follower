@@ -57,7 +57,9 @@ CLI フラグの一覧は README.md が正本。実測値は [calibration.md](ca
 - 前提: 「演奏は再生開始から数秒以内に始まる」
 - ランタイム FeatureConfig とも MrMsDTW の 50Hz 特徴量とも独立な**第三の特徴量経路**（検出専用の使い捨て計算。build_meta やランタイムには影響しない）
 - **安全側設計**: 落差が `_HEAD_DETECT_CONTRAST_MIN` 未満なら「確信なし」としてトリム量 0 を返す。閾値交差点はさらに `_HEAD_DETECT_BACKOFF_SEC` 手前にバックオフする（過剰トリムで冒頭小節を切り落とすより、雑音を少し残す方を選ぶ）
-- トリム量は `build_meta.json` の `reference_start_offset_sec` に永続化
+- トリム量は `build_meta.json` と `warping_path.npz` の `reference_start_offset_sec` に永続化
+
+> **触ってはいけない**: npz の `ref_times` は元録音の時刻軸（トリム量を足し戻した値）だが、ランタイムの `ref_time_sec` はトリム後 CENS のフレーム ÷ レート。`WarpLookup.load()` がトリム量を引いて後者に揃えている。これを外すと全小節がトリム量だけ遅れ、手動 seek は同じだけ先に飛ぶ（幻想1: 1.997s ≈ Largo の 1.5 拍遅れ。npz にトリム量が無い旧ビルドは build_meta.json から読む）
 - **未校正の限界**: 実際に頭雑音が入ったリハ/ゲネプロ録音での動作点の最終校正はまだ。違和感があれば `--start-offset` で明示上書きする。検証内容は → [calibration.md](calibration.md#6-先頭雑音の自動トリム)
 
 ### 合成は FluidSynth で行う（Windows ネイティブ）
