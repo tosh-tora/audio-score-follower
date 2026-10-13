@@ -79,7 +79,8 @@ def _build(root, *, warnings: bool):
         state.set_mic_effects_warning(_MIC_WARNING)
         state.set_slide_controller_warning(_SLIDE_WARNING)
 
-    gui = FollowerGUI(root, state)
+    # ランチャー起動時のみ出る「初期画面へ」ボタンも込みで測る（最悪ケース）。
+    gui = FollowerGUI(root, state, on_return_to_launcher=lambda: True)
     root.geometry(f"{SCREEN_W}x{SCREEN_H}")
     root.update_idletasks()
     gui.update_display()
@@ -121,6 +122,29 @@ def test_both_trigger_markers_are_shown(root):
     gui = _build(root, warnings=False)
     assert "17" in gui.label_prev_trigger.cget("text")
     assert "48" in gui.label_next_trigger.cget("text")
+
+
+def test_return_to_launcher_button_is_disabled_while_performing(root):
+    """「初期画面へ」は演奏中（開始押下後〜終了押下前）だけ押せない。"""
+    gui = _build(root, warnings=False)  # set_movement 済み・待機フラグなし = 演奏中
+    assert str(gui.button_launcher.cget("state")) == tk.DISABLED
+
+    gui.state.set_performance_ended(True)
+    gui.update_display()
+    assert str(gui.button_launcher.cget("state")) == tk.NORMAL
+
+    gui.state.set_performance_ended(False)
+    gui.state.set_waiting_for_start(True)
+    gui.update_display()
+    assert str(gui.button_launcher.cget("state")) == tk.NORMAL
+
+
+def test_return_to_launcher_button_is_absent_in_cli_mode(root):
+    from audio_score_follower.core.state_manager import AppState
+    from audio_score_follower.ui.gui_tkinter import FollowerGUI
+
+    gui = FollowerGUI(root, AppState())
+    assert gui.button_launcher is None
 
 
 def test_prev_trigger_defaults_to_the_opening_measure(root):

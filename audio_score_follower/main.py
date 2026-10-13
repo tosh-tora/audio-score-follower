@@ -106,6 +106,7 @@ class AudioScoreFollowerApp:
         loopback_device=None,
         silence_threshold_db: float | None = None,
         viz: bool = False,
+        allow_return_to_launcher: bool = False,
     ) -> None:
         logger.info(
             "Initialising AudioScoreFollowerApp (config=%s, input_wav=%s, "
@@ -190,6 +191,10 @@ class AudioScoreFollowerApp:
         self._start_press_time: float | None = None
         self._start_gate_timeout_sec = self.config.get_start_gate_timeout_sec()
 
+        # Set by return_to_launcher(); main() reads it after run() returns
+        # to decide between exiting and re-opening the launcher.
+        self.return_to_launcher_requested = False
+
         if slide_url:
             self.slide_controller = SlideController(slide_url=slide_url)
         else:
@@ -211,6 +216,10 @@ class AudioScoreFollowerApp:
             on_start=self.manual_start,
             on_end=self.end_performance,
             on_adjust_threshold=self.adjust_silence_threshold,
+            # CLI mode has no launcher to go back to.
+            on_return_to_launcher=(
+                self.return_to_launcher if allow_return_to_launcher else None
+            ),
         )
 
         # Optional realtime feature/confidence visualiser (--viz). The feed
@@ -700,6 +709,35 @@ class AudioScoreFollowerApp:
         self.state.set_next_trigger(None)
         logger.info("Performance ended by operator — follower stopped; press R/N to re-follow")
 
+    def is_performing(self) -> bool:
+        """True while the follower is live on a performance.
+
+        Mic mode before 「▶ 演奏開始」, after 「■ 演奏終了」, and with no
+        movement loaded all count as not performing. wav/loopback modes
+        auto-start, so they are performing from load until 「■ 演奏終了」.
+        """
+        return (
+            self.worker is not None
+            and self._performance_started
+            and not self._performance_ended
+        )
+
+    def return_to_launcher(self) -> bool:
+        """Close the console and re-open the launcher (GUI 「初期画面へ」).
+
+        Refused while performing: tearing down closes the slide browser
+        too, so the audience screen would go dark mid-performance. The
+        console disables the button in the same states; this guard is the
+        authoritative one. Returns True when the request was accepted.
+        """
+        if self.is_performing():
+            logger.info("return-to-launcher refused: performance in progress (press E first)")
+            return False
+        logger.info("Returning to launcher")
+        self.return_to_launcher_requested = True
+        self._on_gui_closing()
+        return True
+
     def adjust_silence_threshold(self, delta_db: float) -> None:
         """Nudge the silence-gate threshold at runtime (↑/↓ keys).
 
@@ -832,22 +870,7 @@ def main() -> int:
     for noisy in ("numba", "matplotlib", "asyncio", "PIL", "fontTools", "librosa"):
         logging.getLogger(noisy).setLevel(logging.INFO)
 
-    if args.config is None:
-        # No config argument → launcher GUI. Lazy import keeps the CLI
-        # path free of launcher/sounddevice imports.
-        from audio_score_follower.ui.launcher import run_launcher
-
-        try:
-            opts = run_launcher()
-        except tk.TclError as exc:
-            logger.error(
-                "ランチャーを表示できません (%s)。config を引数で指定してください。", exc
-            )
-            return 1
-        if opts is None:
-            logger.info("ランチャーがキャンセルされました")
-            return 0
-    else:
+    if args.config is not None:
         # CLI mode: behaviour unchanged; the persisted settings.launcher
         # block is intentionally ignored here.
         if not Path(args.config).exists():
@@ -865,8 +888,38 @@ def main() -> int:
                 logger.error("%s", err)
             return 1
 
-    if opts.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+        return _run_app(opts, allow_return_to_launcher=False)
+
+    # No config argument → launcher GUI. Lazy import keeps the CLI path
+    # free of launcher/sounddevice imports. The console's 「初期画面へ」
+    # button closes the app and loops back here.
+    from audio_score_follower.ui.launcher import run_launcher
+
+    while True:
+        try:
+            opts = run_launcher()
+        except tk.TclError as exc:
+            logger.error(
+                "ランチャーを表示できません (%s)。config を引数で指定してください。", exc
+            )
+            return 1
+        if opts is None:
+            logger.info("ランチャーがキャンセルされました")
+            return 0
+        rc = _run_app(opts, allow_return_to_launcher=True)
+        if rc != _RC_RETURN_TO_LAUNCHER:
+            return rc
+
+
+# Internal sentinel from _run_app: the operator asked to go back to the
+# launcher. Never escapes main() as a process exit code.
+_RC_RETURN_TO_LAUNCHER = -1
+
+
+def _run_app(opts: launch_options.LaunchOptions, *, allow_return_to_launcher: bool) -> int:
+    # Reset as well as raise: the launcher's verbose checkbox may differ
+    # between rounds of the launcher ↔ console loop.
+    logging.getLogger().setLevel(logging.DEBUG if opts.verbose else logging.INFO)
 
     try:
         app = AudioScoreFollowerApp(
@@ -878,16 +931,16 @@ def main() -> int:
             loopback_device=opts.loopback_device,
             silence_threshold_db=opts.silence_threshold_db,
             viz=opts.viz,
+            allow_return_to_launcher=allow_return_to_launcher,
         )
         app.run()
-        return 0
+        return _RC_RETURN_TO_LAUNCHER if app.return_to_launcher_requested else 0
     except ConfigError as exc:
         logger.error("設定ファイルエラー: %s", exc)
         return 1
     except Exception as exc:  # noqa: BLE001
         logger.exception("Fatal: %s", exc)
         return 1
-
 
 if __name__ == "__main__":
     sys.exit(main())
