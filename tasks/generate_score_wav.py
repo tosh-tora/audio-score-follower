@@ -9,10 +9,16 @@ FluidSynth を使って MusicXML を WAV にレンダリングする。
 のため、FluidSynth + MS Basic.sf3 に切り替えた。音質より特徴量 (CENS chroma)
 精度が重要で、SF2 で十分。
 
-定テンポ化:
-    XML 内の全テンポマーキングを music21 で剥がし、冒頭に単一の
-    MetronomeMark(--bpm) を挿入して MIDI エクスポートする。
-    FluidSynth はこの MIDI テンポイベントをそのまま使うので
+テンポ (2 モード):
+    --tempo-scale S (asf-build の既定):
+        XML のテンポマーキングを残したまま全てを S 倍して合成し、
+        --tempo-map-out に (beats, seconds) のテンポマップを書き出す。
+        Largo→Allegro のような大きなテンポ差を合成側に保持するため
+        （定テンポだと MrMsDTW が対角線に退化する。core/score_tempo.py 参照）。
+    --bpm (定テンポ):
+        XML 内の全テンポマーキングを music21 で剥がし、冒頭に単一の
+        MetronomeMark(--bpm) を挿入して MIDI エクスポートする。
+    どちらも FluidSynth は MIDI テンポイベントをそのまま使い、
     ``score_time = 0`` が「合成 WAV の最初の音」に揃う。
 
 先頭無音トリム:
@@ -56,6 +62,7 @@ if hasattr(sys.stderr, "reconfigure"):
 # still importing the shared FluidSynth/SoundFont locator.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from audio_score_follower.core import score_tempo  # noqa: E402
 from audio_score_follower.core.synth_locator import (  # noqa: E402
     find_fluidsynth,
     find_soundfont,
@@ -202,6 +209,16 @@ def main() -> int:
         help="定テンポ BPM (4分音符基準)。default 120",
     )
     parser.add_argument(
+        "--tempo-scale", type=float, default=None,
+        help="XML のテンポマーキングを保持したまま全体を S 倍して合成する。"
+             "指定時は --bpm を無視する",
+    )
+    parser.add_argument(
+        "--tempo-map-out", type=Path, default=None,
+        help="--tempo-scale 時、(beats, seconds) のテンポマップを npz で書き出す。"
+             "seconds は合成 WAV の時刻（冒頭トリム後 = 最初の音が 0）",
+    )
+    parser.add_argument(
         "--samplerate", type=int, default=22050,
         help="出力サンプルレート。default 22050 (CENS デフォルト)",
     )
@@ -271,8 +288,18 @@ def main() -> int:
     temp_wav: Optional[Path] = None
     try:
         import music21  # type: ignore
+        import numpy as np
 
-        if args.keep_tempo:
+        if args.tempo_scale is not None:
+            score = score_tempo.parse_score(args.score)
+            n = score_tempo.scale_tempo(score, args.tempo_scale)
+            logger.info("テンポマーキング %d 個を %.4f 倍して合成", n, args.tempo_scale)
+            if args.tempo_map_out is not None:
+                beats, seconds = score_tempo.synth_tempo_map(score)
+                np.savez(args.tempo_map_out, beats=beats, seconds=seconds)
+                logger.info("テンポマップ出力: %s (%d 点, %.1f s)",
+                            args.tempo_map_out, len(beats), seconds[-1])
+        elif args.keep_tempo:
             logger.info("--keep-tempo: XML のテンポを維持して合成")
             score = music21.converter.parse(str(args.score))
         else:
@@ -298,7 +325,9 @@ def main() -> int:
         print(f"  サイズ: {args.output.stat().st_size / 1024:.1f} KB")
         print(f"  長さ:   {out_dur:.2f} s @ {args.samplerate} Hz")
         print(f"  冒頭トリム: {head_trim*1000:.0f} ms")
-        if not args.keep_tempo:
+        if args.tempo_scale is not None:
+            print(f"  テンポ倍率: {args.tempo_scale:.4f} (XML のテンポを保持)")
+        elif not args.keep_tempo:
             print(f"  定テンポ: {args.bpm} BPM")
 
     except Exception as exc:

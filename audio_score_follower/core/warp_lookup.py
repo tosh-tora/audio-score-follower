@@ -39,6 +39,7 @@ class WarpLookup:
         score_times: np.ndarray,
         score_bpm: float,
         feature_config: FeatureConfig,
+        tempo_map: Optional[tuple[np.ndarray, np.ndarray]] = None,
     ) -> None:
         if ref_times.shape != score_times.shape:
             raise ValueError(
@@ -55,10 +56,31 @@ class WarpLookup:
         self.score_times = score_times.astype(np.float64)
         self.score_bpm = float(score_bpm)
         self.feature_config = feature_config
+        # (beats, seconds) of a synth that kept the score's tempo marks.
+        # None = legacy constant-tempo build: beat = t * bpm / 60.
+        self.tempo_map: Optional[tuple[np.ndarray, np.ndarray]] = None
+        if tempo_map is not None:
+            beats = np.asarray(tempo_map[0], dtype=np.float64)
+            secs = np.asarray(tempo_map[1], dtype=np.float64)
+            if beats.shape != secs.shape or beats.ndim != 1 or len(beats) < 2:
+                raise ValueError("tempo_map must be two equal-length 1D arrays (>= 2 points)")
+            if np.any(np.diff(beats) <= 0) or np.any(np.diff(secs) <= 0):
+                raise ValueError("tempo_map must be strictly increasing")
+            self.tempo_map = (beats, secs)
 
     @classmethod
     def load(cls, built_dir: Path) -> "WarpLookup":
-        """Load a previously built warp path from a directory."""
+        """Load a previously built warp path from a directory.
+
+        The loaded ref axis is the **trimmed reference CENS timeline** —
+        frame / feature_rate, exactly what the follower reports as
+        ``ref_time_sec`` and what ``trigger_engine`` seeks in. The npz
+        stores ref_times on the *original* recording timeline (the
+        builder re-adds ``reference_start_offset_sec``), so that offset
+        is subtracted here. Without this every lookup lagged by the head
+        trim (幻想1: 1.997s ≈ 1.5 beats of the Largo) and every manual
+        seek landed the same amount too far ahead.
+        """
         npz_path = built_dir / "warping_path.npz"
         if not npz_path.exists():
             raise FileNotFoundError(
@@ -69,11 +91,21 @@ class WarpLookup:
         cfg = FeatureConfig.from_npz_arrays(
             data["feature_config"], data["feature_config_quant_steps"]
         )
+        # Builds before the offset was stored in the npz only have it in
+        # the build_meta.json sidecar (written by the same builder call).
+        if "reference_start_offset_sec" in data.files:
+            start_offset = float(data["reference_start_offset_sec"])
+        else:
+            start_offset = _start_offset_from_meta(built_dir)
+        tempo_map = None
+        if "tempo_map_beats" in data.files:
+            tempo_map = (data["tempo_map_beats"], data["tempo_map_seconds"])
         return cls(
-            ref_times=data["ref_times"],
+            ref_times=data["ref_times"].astype(np.float64) - start_offset,
             score_times=data["score_times"],
             score_bpm=float(data["score_bpm"]),
             feature_config=cfg,
+            tempo_map=tempo_map,
         )
 
     # ---------------------------------------------------------- core lookups
@@ -82,8 +114,16 @@ class WarpLookup:
         return float(np.interp(ref_time_sec, self.ref_times, self.score_times))
 
     def score_time_to_beat(self, score_time_sec: float) -> float:
-        """Constant tempo synth: beat = score_time * bpm / 60."""
-        return score_time_sec * self.score_bpm / 60.0
+        """Synth time → beat, via the tempo map or the constant BPM.
+
+        Outside the map's range the end segments' tempo is extrapolated
+        linearly (np.interp would clamp, freezing the beat — e.g. on the
+        synth's release tail).
+        """
+        if self.tempo_map is None:
+            return score_time_sec * self.score_bpm / 60.0
+        beats, secs = self.tempo_map
+        return _interp_extrapolate(score_time_sec, secs, beats)
 
     def ref_to_beat(self, ref_time_sec: float) -> float:
         """Convenience: reference time → beat (combining the two above)."""
@@ -99,7 +139,10 @@ class WarpLookup:
     # ---------------------------------------------------------- inverse lookups
     def beat_to_score_time(self, beat: float) -> float:
         """Inverse of ``score_time_to_beat``: beat → score time (sec)."""
-        return float(beat) * 60.0 / self.score_bpm
+        if self.tempo_map is None:
+            return float(beat) * 60.0 / self.score_bpm
+        beats, secs = self.tempo_map
+        return _interp_extrapolate(float(beat), beats, secs)
 
     def score_time_to_ref_time(self, score_time_sec: float) -> float:
         """Inverse of ``ref_to_score_time`` (sec → sec).
@@ -197,8 +240,8 @@ class WarpLookup:
                 r0, r1 = sample_ref[idx], sample_ref[idx + 1]
                 s0, s1 = sample_score[idx], sample_score[idx + 1]
                 # Convert to measures for the error message
-                b0 = s0 * self.score_bpm / 60.0
-                b1 = s1 * self.score_bpm / 60.0
+                b0 = self.score_time_to_beat(s0)
+                b1 = self.score_time_to_beat(s1)
                 m0 = score_mapper.beat_to_measure(b0)
                 m1 = score_mapper.beat_to_measure(b1)
                 raise ValueError(
@@ -210,7 +253,7 @@ class WarpLookup:
                 )
 
         # --- Check 2: measure coverage ---
-        score_total_beats = float(self.score_times[-1]) * self.score_bpm / 60.0
+        score_total_beats = self.score_time_to_beat(float(self.score_times[-1]))
         warp_last_measure = score_mapper.beat_to_measure(score_total_beats)
         xml_total_measures = score_mapper.get_total_measures()
         diff = abs(warp_last_measure - xml_total_measures)
@@ -247,8 +290,35 @@ class WarpLookup:
             f"WarpLookup(K={len(self.ref_times)}, "
             f"ref_dur={self.reference_duration_sec():.1f}s, "
             f"score_dur={self.score_duration_sec():.1f}s, "
-            f"bpm={self.score_bpm:.1f})"
+            f"bpm={self.score_bpm:.1f}"
+            f"{', tempo_map' if self.tempo_map is not None else ''})"
         )
+
+
+def _start_offset_from_meta(built_dir: Path) -> float:
+    import json
+
+    meta_path = built_dir / "build_meta.json"
+    if not meta_path.exists():
+        logger.warning(
+            "build_meta.json not found in %s — assuming no reference head "
+            "trim. If the build trimmed the head, measures will lag.",
+            built_dir,
+        )
+        return 0.0
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    return float(meta.get("reference_start_offset_sec", 0.0) or 0.0)
+
+
+def _interp_extrapolate(x: float, xp: np.ndarray, fp: np.ndarray) -> float:
+    """np.interp, but linear extrapolation past both ends of ``xp``."""
+    if x < xp[0]:
+        slope = (fp[1] - fp[0]) / (xp[1] - xp[0])
+        return float(fp[0] + (x - xp[0]) * slope)
+    if x > xp[-1]:
+        slope = (fp[-1] - fp[-2]) / (xp[-1] - xp[-2])
+        return float(fp[-1] + (x - xp[-1]) * slope)
+    return float(np.interp(x, xp, fp))
 
 
 def load_reference_cens(built_dir: Path) -> np.ndarray:
