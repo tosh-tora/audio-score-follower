@@ -138,3 +138,72 @@ def test_nonpositive_bpm_raises():
             score_bpm=0.0,
             feature_config=FeatureConfig(),
         )
+
+
+def _two_tempo_lookup(**kw) -> WarpLookup:
+    """Synth with a tempo map: beats 0-4 take 4 s (♩60), 4-12 take 2 s (♩240)."""
+    return WarpLookup(
+        ref_times=np.array([0.0, 6.0], dtype=np.float32),
+        score_times=np.array([0.0, 6.0], dtype=np.float32),
+        score_bpm=120.0,
+        feature_config=FeatureConfig(),
+        tempo_map=(np.array([0.0, 4.0, 12.0]), np.array([0.0, 4.0, 6.0])),
+        **kw,
+    )
+
+
+def test_tempo_map_overrides_constant_bpm():
+    """With a tempo map, score_time → beat follows the map, not score_bpm."""
+    lookup = _two_tempo_lookup()
+    assert lookup.score_time_to_beat(2.0) == pytest.approx(2.0)   # ♩60 section
+    assert lookup.score_time_to_beat(5.0) == pytest.approx(8.0)   # ♩240 section
+    assert lookup.beat_to_score_time(8.0) == pytest.approx(5.0)
+    for beat in (0.0, 1.5, 4.0, 9.25, 12.0):
+        assert lookup.score_time_to_beat(lookup.beat_to_score_time(beat)) == pytest.approx(beat)
+
+
+def test_tempo_map_extrapolates_past_end():
+    """The synth's release tail runs past the last beat; keep the end tempo."""
+    lookup = _two_tempo_lookup()
+    assert lookup.score_time_to_beat(6.5) == pytest.approx(14.0)
+
+
+def test_tempo_map_round_trips_through_npz(tmp_path):
+    cfg = FeatureConfig()
+    np.savez(
+        tmp_path / "warping_path.npz",
+        ref_times=np.array([0.0, 6.0], dtype=np.float32),
+        score_times=np.array([0.0, 6.0], dtype=np.float32),
+        score_bpm=np.float32(120.0),
+        tempo_map_beats=np.array([0.0, 4.0, 12.0]),
+        tempo_map_seconds=np.array([0.0, 4.0, 6.0]),
+        **cfg.to_npz_arrays(),
+    )
+    loaded = WarpLookup.load(tmp_path)
+    assert loaded.tempo_map is not None
+    assert loaded.ref_to_beat(5.0) == pytest.approx(8.0)
+
+
+def test_legacy_npz_without_tempo_map_uses_bpm(tmp_path):
+    cfg = FeatureConfig()
+    np.savez(
+        tmp_path / "warping_path.npz",
+        ref_times=np.array([0.0, 6.0], dtype=np.float32),
+        score_times=np.array([0.0, 6.0], dtype=np.float32),
+        score_bpm=np.float32(120.0),
+        **cfg.to_npz_arrays(),
+    )
+    loaded = WarpLookup.load(tmp_path)
+    assert loaded.tempo_map is None
+    assert loaded.ref_to_beat(5.0) == pytest.approx(10.0)
+
+
+def test_non_increasing_tempo_map_raises():
+    with pytest.raises(ValueError):
+        WarpLookup(
+            ref_times=np.array([0.0, 1.0], dtype=np.float32),
+            score_times=np.array([0.0, 1.0], dtype=np.float32),
+            score_bpm=120.0,
+            feature_config=FeatureConfig(),
+            tempo_map=(np.array([0.0, 4.0, 4.0]), np.array([0.0, 1.0, 2.0])),
+        )

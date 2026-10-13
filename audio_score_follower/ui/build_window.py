@@ -280,7 +280,7 @@ class BuildWindow:
         self.var_cens = tk.StringVar(value=str(_DEFAULT_CENS_WIN))
         self.var_hop = tk.StringVar(value=str(_DEFAULT_HOP_LENGTH))
         self.var_sr = tk.StringVar(value=str(_DEFAULT_SAMPLE_RATE))
-        self._adv_field(frm_adv, 0, 0, "スコア BPM (空=自動推定):", self.var_bpm)
+        self._adv_field(frm_adv, 0, 0, "定テンポ BPM (空=楽譜のテンポを自動伸縮):", self.var_bpm)
         self._adv_field(frm_adv, 0, 3, "先頭トリム start-offset (空=自動検出/0=無効):", self.var_start)
         self._adv_field(frm_adv, 1, 0, "末尾トリム end-trim (空=自動/0=無効):", self.var_endtrim)
         self._adv_field(frm_adv, 1, 3, "CENS 窓 cens-win:", self.var_cens)

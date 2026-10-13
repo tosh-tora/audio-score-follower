@@ -87,17 +87,34 @@ offset-60 実験の観測: probe 候補が反復テーマの 2 クラスタ間�
 
 ---
 
-## 4. 合成 BPM の自動推定
+## 4. 合成テンポの自動推定
 
 ```
-estimated_bpm = total_beats * 60.0 / ref_duration_sec
+tempo_scale  = marked_duration_sec / ref_duration_sec   # 全テンポ指示に掛ける倍率
+average_bpm  = total_beats * 60.0 / ref_duration_sec    # build_meta の score_bpm・sanity 判定用
 ```
 
-実例: 幻想4（178 measures × 4 beats = 712 beats）/ 281.04s ≈ **152 BPM**。
+平均テンポの実例: 幻想4（178 measures × 4 beats = 712 beats）/ 281.04s ≈ **152 BPM**。
 
-楽譜指示の 120 BPM で固定合成すると、ベルリン・フィルのような速い演奏（281s）との **27% のテンポ差**が MrMsDTW のスキップ大量発生（**21% のステップで score 側のみ進む**）を招き、`WarpLookup.validate`（slope 4.0x 上限）で失敗する。
+楽譜指示の 120 BPM で固定合成すると、ベルリン・フィルのような速い演奏（281s）との **27% のテンポ差**が MrMsDTW のスキップ大量発生（**21% のステップで score 側のみ進む**）を招き、`WarpLookup.validate`（slope 4.0x 上限）で失敗する。総尺を合わせる倍率が要るのはこのため。
 
-sanity range `[20, 400] BPM` 外なら ERROR 停止、参照 duration 5.0s 未満は推定不可エラー。
+**定テンポ合成の破綻（幻想1）**: 楽譜は Largo ♩≈45–56（m1–63）、Allegro ♩≈230–308（m64〜）。平均 161.6 BPM の定テンポ合成では Largo が実演の約 3 倍速く鳴り、warp が対角線に退化した（10 秒窓の slope がほぼ 1.0 のまま）。validate の slope 上限 4.0× は素通りする。
+
+| 1_2 録音で m64（Allegro 冒頭）に到達した時刻 | 定テンポ合成 | テンポ指示 × 倍率 0.9415 |
+|---|---|---|
+| warp path 上の位置 | 99.6s | 283.2s |
+| eval_tracking: 同録音入力 | 102s | 285s |
+| eval_tracking: 別演奏（1_3）入力 | 113s | 324s |
+
+楽譜テンポを参照尺にスケールしただけの予測は ≈303s。同録音・別演奏とも追随指標（カバレッジ・stall・ジャンプ）は旧ビルドと同一で、変わったのは小節換算のみ。1_3 を参照にして独立にビルドすると m64 は 321.9s で、上表の別演奏追随（324s）と整合する。
+
+テンポ変化の小さい楽章での non-regression（別演奏 file-input、旧 → 新）:
+
+- 幻想4（倍率 1.0933）: 2 演奏ともカバレッジ 178/178 のまま。旧 warp との小節差は平均 0.07
+- 幻想5（倍率 1.0132）: 2 演奏ともカバレッジ 524/524 のまま。m21–30・m104–127 付近で最大約 3.5s ずれる
+  - m29 の ff 突入の強オンセット（93.9s）に対し、旧 91.4s、新 94.7s。新の方が近い
+
+sanity range `[20, 400] BPM`（平均テンポ）外なら ERROR 停止、参照 duration 5.0s 未満は推定不可エラー。
 
 ---
 
@@ -114,7 +131,7 @@ sanity range `[20, 400] BPM` 外なら ERROR 停止、参照 duration 5.0s 未�
 
 トリムしないと 2 つの故障が同時に起きる:
 
-1. BPM 推定の分母（ref_duration）が水増しされ合成テンポが遅くなる
+1. 合成テンポ推定の分母（ref_duration）が水増しされ合成テンポが遅くなる
 2. MrMsDTW がスコアの最終小節群を無音尾部にマップする → 無音区間の CENS はどの演奏ともマッチしないので、**runtime はどの入力でも最後の数小節に到達できない**
 
 ---
