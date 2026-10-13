@@ -78,6 +78,7 @@ def _make_app() -> AudioScoreFollowerApp:
     app._start_gate_timeout_sec = 3.0
     app._workers_stop = threading.Event()
     app._workers_stop.set()  # suppress root.after rescheduling
+    app.return_to_launcher_requested = False
     return app
 
 
@@ -188,3 +189,44 @@ def test_set_movement_clears_ended_flag():
     assert state.get_all()["performance_ended"] is True
     state.set_movement(movement_id=2, xml_file="y.mxl", triggers=[])
     assert state.get_all()["performance_ended"] is False
+
+
+# ---- 初期画面へ（ランチャー復帰）は演奏中でない時に限る ----
+
+def _closing_recorder(app):
+    calls = []
+    app._on_gui_closing = lambda: calls.append(True)
+    return calls
+
+
+def test_return_to_launcher_refused_while_performing():
+    app = _make_app()
+    closed = _closing_recorder(app)
+    assert app.return_to_launcher() is False
+    assert app.return_to_launcher_requested is False
+    assert closed == []
+
+
+def test_return_to_launcher_allowed_after_end():
+    app = _make_app()
+    app.end_performance()
+    closed = _closing_recorder(app)
+    assert app.return_to_launcher() is True
+    assert app.return_to_launcher_requested is True
+    assert closed == [True]
+
+
+def test_return_to_launcher_allowed_while_waiting_for_start():
+    app = _make_app()
+    app._performance_started = False  # mic mode, before 「▶ 演奏開始」
+    closed = _closing_recorder(app)
+    assert app.return_to_launcher() is True
+    assert closed == [True]
+
+
+def test_return_to_launcher_allowed_without_a_loaded_movement():
+    app = _make_app()
+    app.worker = None  # first movement failed to load
+    closed = _closing_recorder(app)
+    assert app.return_to_launcher() is True
+    assert closed == [True]

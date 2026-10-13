@@ -23,7 +23,7 @@ extra point costs the window directly.
 import logging
 import time
 import tkinter as tk
-from tkinter import font
+from tkinter import font, messagebox
 from typing import Callable, List, Optional
 
 from audio_score_follower.core.state_manager import AppState
@@ -93,6 +93,20 @@ _WRAP_MARGIN_PX = 60
 _THRESHOLD_BUTTON_STEP_DB = 1.0
 
 
+def can_return_to_launcher(state: dict) -> bool:
+    """Whether the console may offer 「初期画面へ」 for this snapshot.
+
+    Not performing = waiting for 「▶ 演奏開始」, ended by 「■ 演奏終了」,
+    or no movement loaded. Mirrors ``AudioScoreFollowerApp.is_performing``
+    (which is the authoritative guard) from the state flags the GUI sees.
+    """
+    return bool(
+        state.get('waiting_for_start')
+        or state.get('performance_ended')
+        or not state.get('xml_file')
+    )
+
+
 class FollowerGUI:
     """
     Operator console for Audio Score Follower.
@@ -108,6 +122,7 @@ class FollowerGUI:
         on_start: Optional[Callable[[], None]] = None,
         on_end: Optional[Callable[[], None]] = None,
         on_adjust_threshold: Optional[Callable[[float], None]] = None,
+        on_return_to_launcher: Optional[Callable[[], bool]] = None,
     ):
         """
         Initialize GUI.
@@ -131,12 +146,17 @@ class FollowerGUI:
                 ``AudioScoreFollowerApp.adjust_silence_threshold``
                 (no-op in wav/loopback modes where no gate runs).
                 Optional for standalone/test use.
+            on_return_to_launcher: callback fired when the operator
+                confirms the "⏎ 初期画面へ" button. Wired by ``main.py``
+                to ``AudioScoreFollowerApp.return_to_launcher`` in
+                launcher mode only; None (CLI mode) hides the button.
         """
         self.root = root
         self.state = state
         self._on_start = on_start or (lambda: None)
         self._on_end = on_end or (lambda: None)
         self._on_adjust_threshold = on_adjust_threshold or (lambda _d: None)
+        self._on_return_to_launcher = on_return_to_launcher
 
         self.root.title("Audio Score Follower 操作コンソール")
         self.root.geometry(_WINDOW_GEOMETRY)
@@ -233,6 +253,23 @@ class FollowerGUI:
         # 不安になるのを防ぐ）。
         movement_card = self._card(self.root, "")
         movement_card.outer.pack(fill="x", padx=16, pady=(0, 6))  # type: ignore[attr-defined]
+
+        # 「初期画面へ」: ランチャーに戻る。戻るとスライドのブラウザも閉じて
+        # 客席の画面が消えるので、演奏中は押せない（disable。隠すと押せる
+        # 時を操作者が覚えていなければならない）。曲カードの右側の空きに
+        # 置くのは縦の予算を食わないため（Issue #51: ヘッダー行に置いたら
+        # 警告 3 種同時の最悪ケースで 800px を超えた）。
+        self.button_launcher: Optional[tk.Button] = None
+        self._launcher_button_enabled = True
+        if self._on_return_to_launcher is not None:
+            self.button_launcher = tk.Button(
+                movement_card,
+                text="⏎ 初期画面へ",
+                font=(family, _HINT_FONT_SIZE),
+                command=self._on_launcher_clicked,
+                padx=6,
+            )
+            self.button_launcher.pack(side=tk.RIGHT, padx=12)
 
         self.label_movement = tk.Label(
             movement_card,
@@ -525,6 +562,26 @@ class FollowerGUI:
         except Exception as exc:  # noqa: BLE001
             logger.error("end_performance callback raised: %s", exc, exc_info=True)
 
+    def _on_launcher_clicked(self) -> None:
+        """Button handler — confirm, then hand off to the app, which
+        re-checks it is not performing and tears the console down. Nothing
+        may touch ``self.root`` after an accepted request (it is destroyed)."""
+        if self._on_return_to_launcher is None:
+            return
+        if not can_return_to_launcher(self.state.get_all()):
+            return
+        if not messagebox.askokcancel(
+            "初期画面へ戻る",
+            "操作コンソールを閉じて初期画面（ランチャー）に戻ります。\n"
+            "スライド画面も閉じます。よろしいですか?",
+            parent=self.root,
+        ):
+            return
+        try:
+            self._on_return_to_launcher()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("return_to_launcher callback raised: %s", exc, exc_info=True)
+
     def _mode_text(self, state: dict, label: str, level: str) -> str:
         """Operator wording for a status the audience screen also shows.
 
@@ -737,6 +794,15 @@ class FollowerGUI:
 
             # ----- 追随モード表示の更新 -----
             self._render_follower_mode(state)
+
+            # 初期画面へボタン: 演奏中でない時だけ有効（差分時のみ config）
+            if self.button_launcher is not None:
+                enabled = can_return_to_launcher(state)
+                if enabled != self._launcher_button_enabled:
+                    self._launcher_button_enabled = enabled
+                    self.button_launcher.config(
+                        state=tk.NORMAL if enabled else tk.DISABLED
+                    )
 
             # クールダウン
             if state['cooldown_active']:
