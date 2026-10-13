@@ -135,3 +135,11 @@
 **結果**: v4.6.5 で CLI バッチモードがハングするバグがあり使用不可。
 
 **結論**: **FluidSynth** を使う（`tasks/generate_score_wav.py`）。
+
+### 定テンポ合成 単一 BPM
+
+**内容**: スコア合成時に XML のテンポ指示を全部剥がし、平均テンポ（総ビート × 60 ÷ 参照 duration）の単一 BPM で鳴らす。score_time → beat が `t * bpm / 60` の一次式で済む。
+
+**結果**: テンポ差の大きい楽章で warp が対角線に退化した。幻想1（Largo ♩≈50 / Allegro ♩≈250）では Allegro 冒頭 m64 が参照 99.6s にマップされた（正しくは ≈283s）。Largo の間、小節が実際の約 3 倍速で進む。`WarpLookup.validate` の slope 上限 4.0× は素通りする（→ [calibration.md](calibration.md#4-合成テンポの自動推定)）。
+
+**結論**: テンポ指示を残して全体を一律倍率で伸縮し、テンポマップを保存する方式に置き換えた（→ [offline-build.md](offline-build.md#合成テンポ楽譜のテンポ指示--一律倍率)）。`--score-bpm` 明示時のみ定テンポ合成が残る。

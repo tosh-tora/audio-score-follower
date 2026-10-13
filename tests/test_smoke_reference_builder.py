@@ -161,6 +161,55 @@ def test_build_reference_recovers_known_tempo_warp(tmp_path):
     )
 
 
+def test_build_reference_tempo_map_maps_ref_time_to_beats(tmp_path):
+    """幻想1 regression: a synth that keeps the score's tempo marks.
+
+    One note per beat: beats 0-4 at ♩40 (1.5 s/note), beats 4-8 at ♩200
+    (0.3 s/note) — a 5× contrast like Largo → Allegro. The tempo map
+    passed to build_reference must be persisted and used by WarpLookup,
+    so ref time → beat lands in the right note on both sides of the
+    tempo change (beat = t*bpm/60 would put the slow section ~2× early).
+    """
+    pytest.importorskip("librosa")
+    pytest.importorskip("synctoolbox")
+    from scipy.io import wavfile  # type: ignore
+    from audio_score_follower.core.feature_extractor import FeatureConfig
+    from audio_score_follower.core.reference_builder import build_reference
+    from audio_score_follower.core.warp_lookup import WarpLookup
+
+    sr = 22050
+    cfg = FeatureConfig(sample_rate=sr, hop_length=2048)
+
+    score_durs = [1.5] * 4 + [0.3] * 4
+    score_path = tmp_path / "score.wav"
+    wavfile.write(str(score_path), sr,
+                  (_make_note_sequence(sr, score_durs) * 32000).astype(np.int16))
+    ref_durs = [d * 1.1 for d in score_durs]
+    ref_path = tmp_path / "ref.wav"
+    wavfile.write(str(ref_path), sr,
+                  (_make_note_sequence(sr, ref_durs) * 32000).astype(np.int16))
+
+    tempo_map = (np.arange(9, dtype=np.float64), np.cumsum([0.0] + score_durs))
+    out_dir = tmp_path / "built_tempo_map"
+    build_reference(
+        score_wav=score_path,
+        reference_wav=ref_path,
+        output_dir=out_dir,
+        score_bpm=8 * 60.0 / sum(score_durs),  # average, as asf-build stores
+        feature_config=cfg,
+        tempo_map=tempo_map,
+        plot=False,
+    )
+
+    lookup = WarpLookup.load(out_dir)
+    assert lookup.tempo_map is not None
+    ref_bounds = np.cumsum([0.0] + ref_durs)
+    for i in range(1, 7):  # mid-note probes, endpoints skipped
+        mid = (ref_bounds[i] + ref_bounds[i + 1]) / 2
+        beat = lookup.ref_to_beat(mid)
+        assert i <= beat < i + 1, f"ref {mid:.2f}s → beat {beat:.2f}, expected note {i}"
+
+
 def test_build_reference_end_trim(tmp_path):
     """reference_end_trim_sec cuts the reference tail before alignment.
 

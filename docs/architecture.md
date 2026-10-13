@@ -52,7 +52,7 @@ AppState → ui/audience_panel.py → SlideController → 聴衆向け画面の�
 | 起動オプションの検証・CLI/ランチャー共通ロジック | `launch_options.py`（Tk/sounddevice 非依存の純ロジック） |
 | リアルタイム可視化 `--viz` のデータ供給層 | `core/viz_feed.py`（**将来の観客用画面も同じ `VizFeed` を読む別描画クラスとして `ui/` に足す**） |
 | 同上の描画層 | `ui/viz_window.py` |
-| オフラインビルド（warp 検証・BPM 推定・前後トリム） | `cli/build_reference.py` + `core/reference_builder.py` |
+| オフラインビルド（warp 検証・合成テンポ推定・前後トリム） | `cli/build_reference.py` + `core/reference_builder.py` + `core/score_tempo.py` |
 | スコア合成 WAV 生成 | `tasks/generate_score_wav.py` |
 | 追従品質のヘッドレス計測 | `tasks/eval_tracking.py` |
 | 実験資産: 全域観測ベイズフィルタ（**本番不使用**、eval 専用） | `core/posterior_follower.py` → [experiments.md](experiments.md#全域観測ベイズフィルタ-posterior_follower) |
