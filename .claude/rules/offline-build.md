@@ -5,9 +5,11 @@ paths:
   - "audio_score_follower/core/warp_lookup.py"
   - "audio_score_follower/core/score_mapper.py"
   - "audio_score_follower/core/movement_loader.py"
+  - "audio_score_follower/core/score_tempo.py"
   - "tasks/generate_score_wav.py"
   - "tests/test_smoke_reference_builder.py"
   - "tests/test_warp_lookup.py"
+  - "tests/test_score_tempo.py"
 ---
 
 # オフラインビルドを触るときの規約
@@ -16,10 +18,10 @@ paths:
 
 - `スコア ↔ 参照音源` の不一致は `WarpLookup.validate()` がビルド時とロード時に検出する
 - **`参照音源 ↔ 本番ライブ` の不一致は検出も回復もできない。** 当日の指揮者がリピートの取り方を変えた場合、OLTW は黙って stall か誤追随に陥る。対策は本番前の確認と再ビルドだけ
-- 自動トリム（先頭雑音・末尾無音）と BPM 自動推定は、外すと warp が壊れる方向に効く。無効化する前に [docs/offline-build.md](../../docs/offline-build.md) の失敗モードを読むこと
+- 自動トリム（先頭雑音・末尾無音）と合成テンポ自動推定（楽譜テンポ指示 × 一律倍率）は、外すと warp が壊れる方向に効く。無効化する前に [docs/offline-build.md](../../docs/offline-build.md) の失敗モードを読むこと
 
 詳細は [docs/offline-build.md](../../docs/offline-build.md)、実測値は [docs/calibration.md](../../docs/calibration.md)。
 
 ```bash
-python -m pytest tests/test_smoke_reference_builder.py tests/test_warp_lookup.py -q
+python -m pytest tests/test_smoke_reference_builder.py tests/test_warp_lookup.py tests/test_score_tempo.py -q
 ```

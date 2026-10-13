@@ -43,6 +43,9 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Optional
+
+import numpy as np
 
 # Windows console defaults to cp932 / cp1252, which cannot encode the
 # em-dash and Japanese characters we use in argparse help text. Forcing
@@ -58,6 +61,7 @@ from audio_score_follower.core.reference_builder import (
     detect_start_offset_sec,
 )
 from audio_score_follower.core.score_mapper import ScoreMapper
+from audio_score_follower.core.score_tempo import marked_duration_sec
 from audio_score_follower.core.synth_locator import find_fluidsynth, find_soundfont
 from audio_score_follower.core.warp_lookup import WarpLookup
 
@@ -87,11 +91,21 @@ def _resolve_data_path(given: Path, default_dir: Path) -> Path:
     return default_dir / given
 
 
-def _synth_score_wav(score_xml: Path, bpm: float, sample_rate: int) -> Path:
+def _synth_score_wav(
+    score_xml: Path,
+    bpm: float,
+    sample_rate: int,
+    tempo_scale: Optional[float] = None,
+) -> tuple[Path, Optional[tuple[np.ndarray, np.ndarray]]]:
     """Invoke tasks/generate_score_wav.py to produce a temporary synth WAV.
 
     The script lives in this project root; we call it via the same
     Python interpreter the CLI is running under.
+
+    With ``tempo_scale`` the synth keeps the score's tempo marks (all
+    multiplied by the scale) and the returned tempo map is
+    ``(beats, seconds)``; otherwise it plays at constant ``bpm`` and the
+    map is None.
     """
     repo_root = Path(__file__).resolve().parents[2]
     script = repo_root / "tasks" / "generate_score_wav.py"
@@ -112,6 +126,12 @@ def _synth_score_wav(score_xml: Path, bpm: float, sample_rate: int) -> Path:
         "--bpm", str(bpm),
         "--samplerate", str(sample_rate),
     ]
+    map_path: Optional[Path] = None
+    if tempo_scale is not None:
+        map_tmp = tempfile.NamedTemporaryFile(suffix=".npz", delete=False)
+        map_tmp.close()
+        map_path = Path(map_tmp.name)
+        cmd += ["--tempo-scale", str(tempo_scale), "--tempo-map-out", str(map_path)]
     # Detect FluidSynth and SF in the parent process (env vars are reliable here)
     # and pass them explicitly so the subprocess doesn't need to re-detect.
     fluidsynth = find_fluidsynth()
@@ -136,7 +156,15 @@ def _synth_score_wav(score_xml: Path, bpm: float, sample_rate: int) -> Path:
             f"to the fluidsynth.exe path, and SF_FILE to a SF2/SF3 soundfont."
         )
     logger.info("Score synth complete: %s", tmp_path)
-    return tmp_path
+    tempo_map = None
+    if map_path is not None:
+        with np.load(map_path) as data:
+            tempo_map = (data["beats"].copy(), data["seconds"].copy())
+        try:
+            map_path.unlink()
+        except OSError:
+            pass
+    return tmp_path, tempo_map
 
 
 _MIN_REF_DURATION_SEC = 5.0
@@ -230,12 +258,13 @@ def main() -> int:
     )
     parser.add_argument(
         "--score-bpm", type=float, default=None,
-        help="Quarter-note BPM used by the score synth. If omitted, "
-             "estimated automatically from the reference recording's "
-             "duration and the score's total beat count "
-             "(total_beats * 60 / ref_duration). REQUIRED when "
-             "--score-wav is given, since synth tempo cannot be "
-             "inferred from a pre-made WAV.",
+        help="Synthesise at this constant quarter-note BPM, discarding "
+             "the score's tempo marks. If omitted, the synth keeps the "
+             "score's tempo marks, all scaled by one factor so its total "
+             "length matches the reference recording (needed for "
+             "movements with large tempo changes, e.g. Largo → Allegro). "
+             "REQUIRED when --score-wav is given, since synth tempo "
+             "cannot be inferred from a pre-made WAV.",
     )
     parser.add_argument(
         "--start-offset", type=float, default=None,
@@ -350,6 +379,8 @@ def main() -> int:
     score_wav = args.score_wav
     cleanup_tmp = False
     resolved_bpm: float
+    tempo_scale: Optional[float] = None
+    tempo_map: Optional[tuple[np.ndarray, np.ndarray]] = None
 
     if score_wav is not None:
         if not score_wav.exists():
@@ -396,16 +427,31 @@ def main() -> int:
                     resolved_bpm, lo, hi, total_beats, effective_ref_dur,
                 )
                 return 1
+            # Keep the score's own tempo marks and scale them all so the
+            # synth lasts effective_ref_dur. A single constant BPM made
+            # 幻想1's warp degenerate (Largo ♩≈50 vs Allegro ♩≈250 —
+            # see core/score_tempo.py). resolved_bpm stays as the
+            # average tempo (same value as before) for build_meta.
+            try:
+                tempo_scale = marked_duration_sec(args.score) / effective_ref_dur
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Could not read the score's tempo marks: %s "
+                             "Pass --score-bpm explicitly for a constant-"
+                             "tempo synth.", exc)
+                return 1
             logger.info(
-                "Estimated synth tempo: %.1f beats / %.2fs ref → BPM=%.2f "
-                "(quarter-note). Override with --score-bpm if undesirable.",
-                total_beats, effective_ref_dur, resolved_bpm,
+                "Synth tempo: score's tempo marks × %.4f (average %.1f "
+                "beats / %.2fs ref → BPM=%.2f). Pass --score-bpm for a "
+                "constant-tempo synth instead.",
+                tempo_scale, total_beats, effective_ref_dur, resolved_bpm,
             )
         else:
             resolved_bpm = float(args.score_bpm)
 
         try:
-            score_wav = _synth_score_wav(args.score, resolved_bpm, args.sample_rate)
+            score_wav, tempo_map = _synth_score_wav(
+                args.score, resolved_bpm, args.sample_rate, tempo_scale
+            )
             cleanup_tmp = True
         except Exception as exc:
             logger.error("Failed to synthesise score WAV: %s", exc)
@@ -444,6 +490,7 @@ def main() -> int:
             feature_config=cfg,
             reference_start_offset_sec=start_offset,
             reference_end_trim_sec=end_trim,
+            tempo_map=tempo_map,
             plot=args.plot,
         )
         logger.info(
