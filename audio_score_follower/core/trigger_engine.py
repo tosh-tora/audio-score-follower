@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from audio_score_follower.core.cooldown_timer import CooldownTimer
@@ -192,8 +193,17 @@ class TriggerEngine:
                 the log for context. ``author`` is appended only when
                 present, so configs without it keep the old log format.
         """
+        video_movement = any("video" in t for t in self.state.current_triggers)
+        if video_movement and trigger is None:
+            # A bare →/← (no trigger left to consume) has no scene to show,
+            # and a key press would land on the hidden deck.
+            logger.info("Video movement: %s [%s] has no scene; ignored", action, source)
+            return
         try:
-            self.slide_controller.press(action)
+            if video_movement:
+                self._show_scene(action, trigger)
+            else:
+                self.slide_controller.press(action)
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "Slide action %s failed [%s]: %s", action, source, exc, exc_info=True
@@ -203,14 +213,34 @@ class TriggerEngine:
             self.state.mark_manual_adjustment()
         if trigger is not None:
             author = trigger.get("author") or ""
+            video = trigger.get("video")
             logger.info(
-                "Slide %s [%s] measure=%d note=%s%s",
+                "Slide %s [%s] measure=%d note=%s%s%s",
                 action, source, trigger.get("measure"),
                 trigger.get("note", ""),
                 f" author={author}" if author else "",
+                f" video={Path(video).name}" if video else "",
             )
         else:
             logger.info("Slide %s [%s]", action, source)
+
+    def _show_scene(self, action: str, trigger: Dict) -> None:
+        """Video-movement counterpart of a key press.
+
+        "right" plays the trigger's own scene (not "the next file"), so a
+        trigger skipped by a measure jump never shifts later scenes. "left"
+        is the manual undo of ``trigger``: show the PREVIOUS scene's last
+        frame, still — replaying it would show its comments twice. When
+        the undone trigger fires again, its scene plays from the top.
+        """
+        ordered = sorted(self.state.current_triggers, key=lambda t: t["measure"])
+        idx = next(i for i, t in enumerate(ordered) if t["measure"] == trigger["measure"])
+        if action == "left":
+            prev = ordered[idx - 1]["video"] if idx > 0 else None
+            self.slide_controller.hold_video_end(prev)
+        else:
+            nxt = ordered[idx + 1]["video"] if idx + 1 < len(ordered) else None
+            self.slide_controller.play_video(trigger["video"], nxt)
 
     # ----------------------- manual override helpers -----------------
     def _find_next_pending_trigger(self) -> Optional[Dict]:

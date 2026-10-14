@@ -65,6 +65,15 @@
   @keyframes asf-shake { 0%, 100% { transform: translateX(0); }
     25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
   @keyframes asf-pop { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.1); } }
+  /* Video movements: scene videos fill the whole screen, no panel. The
+     slides side is only hidden (visibility, not display or src) so the
+     deck keeps its page across a video movement. */
+  #videos { position: fixed; inset: 0; background: #000; display: none; }
+  body[data-mode="video"] #videos { display: block; }
+  body[data-mode="video"] #wrap { visibility: hidden; }
+  #videos video { position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: contain; opacity: 0; transition: opacity 0.6s ease; }
+  #videos video.front { opacity: 1; }
 </style>
 </head>
 <body>
@@ -154,6 +163,10 @@
     <div id="manual">人が調整！</div>
   </div>
 </div>
+<div id="videos">
+  <video muted playsinline preload="auto"></video>
+  <video muted playsinline preload="auto"></video>
+</div>
 <script>
   const src = new URLSearchParams(location.search).get("src");
   const slide = document.getElementById("slide");
@@ -183,6 +196,108 @@
     document.getElementById("manual").classList.toggle("on", !!v.manual);
     document.getElementById("berlioz").dataset.mood = v.manual ? "manual" : v.status_level;
   };
+
+  // ---- Video movements. Python decides WHICH scene; this only plays it.
+  // Two <video> elements: the next scene starts in the hidden one and
+  // fades in over the current one, so a scene change never shows a black
+  // gap while the new file decodes. A finished scene simply stays on its
+  // last frame until the next trigger.
+  window.asfSetMode = (mode) => { document.body.dataset.mode = mode; };
+
+  const FADE_MS = 700;  // matches the CSS opacity transition (+ margin)
+  const vids = Array.from(document.querySelectorAll("#videos video"));
+  // Every play / hold / black bumps the token; callbacks of a superseded
+  // request (operator pressing → twice quickly) see a stale token and bail.
+  let token = 0;
+  const front = () => vids.find((v) => v.classList.contains("front")) || null;
+  // A non-front element, preferring one that already holds uri (preloaded).
+  const spare = (uri) => {
+    const free = vids.filter((v) => !v.classList.contains("front"));
+    return free.find((v) => v.dataset.uri === uri) || free[0];
+  };
+  const load = (v, uri) => {
+    if (v.dataset.uri !== uri) { v.dataset.uri = uri; v.src = uri; }
+  };
+  const show = (v, my) => {
+    if (my !== token) { v.pause(); return false; }
+    const old = front();
+    v.classList.add("front");
+    if (old && old !== v) {
+      old.classList.remove("front");
+      setTimeout(() => { if (!old.classList.contains("front")) old.pause(); }, FADE_MS);
+    }
+    return true;
+  };
+  const withTimeout = (p, ms, what) => Promise.race([p,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(what + " timed out")), ms))]);
+
+  // Play a scene from the top. Resolves {cut, error}: cut = the previous
+  // scene was still playing (scene longer than this performance's gap).
+  window.asfPlay = async (uri, nextUri) => {
+    const my = ++token;
+    const cur = front();
+    const cut = !!cur && !cur.paused && !cur.ended;
+    const v = spare(uri);
+    load(v, uri);
+    v.currentTime = 0;
+    try {
+      await withTimeout(v.play(), 5000, "play");
+    } catch (e) {
+      return { cut, error: String(e) };
+    }
+    if (show(v, my) && nextUri) {
+      // Preload the following scene into the element that just faded out.
+      setTimeout(() => { if (my === token) load(spare(nextUri), nextUri); }, FADE_MS + 100);
+    }
+    return { cut, error: null };
+  };
+
+  // Show a scene's last frame, still (manual ← : replaying it would show
+  // the scene's comments a second time).
+  window.asfHoldEnd = async (uri) => {
+    const my = ++token;
+    const v = spare(uri);
+    load(v, uri);
+    v.pause();
+    try {
+      if (v.readyState < 1) {
+        await withTimeout(new Promise((resolve, reject) => {
+          v.addEventListener("loadedmetadata", resolve, { once: true });
+          v.addEventListener("error", () => reject(new Error("load error")), { once: true });
+        }), 5000, "load");
+      }
+      const seeked = new Promise((resolve) => v.addEventListener("seeked", resolve, { once: true }));
+      // Just short of duration: seeking exactly to the end can paint black.
+      v.currentTime = Math.max(0, v.duration - 0.05);
+      await withTimeout(seeked, 5000, "seek");
+    } catch (e) {
+      return { error: String(e) };
+    }
+    show(v, my);
+    return { error: null };
+  };
+
+  window.asfBlack = () => {
+    const my = ++token;
+    vids.forEach((v) => v.classList.remove("front"));
+    setTimeout(() => { if (my === token) vids.forEach((v) => v.pause()); }, FADE_MS);
+  };
+
+  // Startup check of one scene file: can this browser decode it? Uses a
+  // throwaway element so it never disturbs what is on screen.
+  window.asfProbe = (uri) => new Promise((resolve) => {
+    const v = document.createElement("video");
+    v.muted = true;
+    v.preload = "metadata";
+    const done = (r) => { clearTimeout(timer); v.removeAttribute("src"); v.load(); resolve(r); };
+    const timer = setTimeout(() => done({ ok: false, error: "timeout" }), 10000);
+    v.addEventListener("loadedmetadata", () =>
+      done({ ok: v.videoWidth > 0, duration: v.duration,
+             error: v.videoWidth > 0 ? null : "no video track (codec unsupported?)" }), { once: true });
+    v.addEventListener("error", () =>
+      done({ ok: false, error: v.error ? `MediaError ${v.error.code}` : "error" }), { once: true });
+    v.src = uri;
+  });
 </script>
 </body>
 </html>
