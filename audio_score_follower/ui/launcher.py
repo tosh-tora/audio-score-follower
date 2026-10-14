@@ -58,6 +58,7 @@ _WRAP_FIELD = "380p"
 # Aligns the label column across sections (widest: the loopback radio).
 _LABEL_COL_MINSIZE = "165p"
 _DEFAULT_DEVICE_LABEL = "既定のデバイス"
+_ENUM_FAILED_TEXT = "デバイス一覧を取得できませんでした — 番号または名前を直接入力してください"
 _MEASURE_IDLE_TEXT = "未測定 — 本番前にステージが無音の状態で測定してください"
 _HINT_FG = "#777"
 
@@ -74,6 +75,10 @@ _HELP = {
         "本番の標準モード。選んだマイクの音で演奏を追随します。\n"
         "無音測定・ノイズキャンセル検知も常にこのマイクで行います。"
         "（CLI:既定/ settings.mic_device）"
+    ),
+    "rescan": (
+        "ランチャー起動後に抜き差ししたマイク・オーディオI/Fを一覧に反映します。"
+        "選択中のデバイスは名前で引き継ぎます（ループバック一覧も更新）。"
     ),
     "loopback": (
         "PCが再生している音（YouTube・DAWなど）をそのまま取り込んで追随します。"
@@ -171,6 +176,24 @@ def _list_devices(
         return []
 
 
+def reinitialize_portaudio() -> None:
+    """Make the next query_devices() see hot-plugged devices.
+
+    PortAudio snapshots the device list at Pa_Initialize, so a USB I/F
+    plugged in after the launcher opened stays invisible until a
+    terminate/initialize cycle. sounddevice has no public API for this;
+    _terminate/_initialize is its documented-in-issues idiom. Every
+    stream must be closed first (terminate invalidates open streams).
+    """
+    try:
+        import sounddevice as sd
+
+        sd._terminate()
+        sd._initialize()
+    except BaseException as exc:  # noqa: BLE001
+        logger.warning("PortAudio re-initialisation failed: %s", exc)
+
+
 def list_input_devices() -> list[tuple[int, str, str]]:
     """Enumerate input-capable devices as (index, raw_name, display_label)."""
     return _list_devices("max_input_channels", wasapi_only=False, warn_label="Input")
@@ -198,20 +221,25 @@ class _DevicePicker:
         devices: list[tuple[int, str, str]],
         default_label: str,
     ) -> None:
-        self.devices = devices
+        self._parent = parent
         self._var = tk.StringVar()
-        if devices:
-            labels = [default_label] + [label for _, _, label in devices]
-            self.widget: tk.Widget = ttk.Combobox(
-                parent, textvariable=self._var, values=labels, state="readonly",
-                width=52,
-            )
-            self._var.set(default_label)
-            self._fallback = False
-        else:
-            self.widget = ttk.Entry(parent, textvariable=self._var, width=54)
-            self._fallback = True
         self._default_label = default_label
+        self._enabled = True
+        self._create_widget(devices)
+        if devices:
+            self._var.set(default_label)
+
+    def _create_widget(self, devices: list[tuple[int, str, str]]) -> None:
+        self.devices = devices
+        self._fallback = not devices
+        if devices:
+            labels = [self._default_label] + [label for _, _, label in devices]
+            self.widget: tk.Widget = ttk.Combobox(
+                self._parent, textvariable=self._var, values=labels,
+                state="readonly", width=52,
+            )
+        else:
+            self.widget = ttk.Entry(self._parent, textvariable=self._var, width=54)
 
     def value(self):
         if self._fallback:
@@ -255,7 +283,38 @@ class _DevicePicker:
                 return
         self._var.set(self._default_label)
 
+    def set_devices(self, devices: list[tuple[int, str, str]]) -> bool:
+        """Swap in a fresh enumeration, keeping the selection by name.
+
+        Returns False when a concrete device was selected and is gone
+        (selection fell back to the default) so the caller can say so —
+        silently recording from the OS default mic is the failure mode
+        that matters on stage.
+        """
+        stored_device, stored_name = self.value(), self.selected_name()
+        if self._fallback != (not devices):
+            # Entry <-> Combobox: rebuild in the same grid cell.
+            grid = self.widget.grid_info()
+            self.widget.destroy()
+            self._create_widget(devices)
+            grid.pop("in", None)
+            self.widget.grid(**grid)
+            self.set_enabled(self._enabled)
+        else:
+            self.devices = devices
+            if devices:
+                self.widget.configure(
+                    values=[self._default_label] + [lbl for _, _, lbl in devices]
+                )
+        if self._fallback or stored_device is None:
+            # restore() also clears a stale Combobox label out of the Entry.
+            self.restore(stored_device, stored_name)
+            return True
+        self.restore(stored_device, stored_name)
+        return isinstance(self.value(), int)
+
     def set_enabled(self, enabled: bool) -> None:
+        self._enabled = enabled
         if self._fallback:
             self.widget.configure(state="normal" if enabled else "disabled")
         else:
@@ -349,7 +408,13 @@ class _LauncherWindow:
         )
         radio_mic.grid(row=0, column=0, sticky="w", **row_pad)
         self.pick_mic = _DevicePicker(frm_src, list_input_devices(), _DEFAULT_DEVICE_LABEL)
-        self.pick_mic.widget.grid(row=0, column=1, columnspan=2, sticky="we", **row_pad)
+        self.pick_mic.widget.grid(row=0, column=1, sticky="we", **row_pad)
+        # Not tied to the input source (same reason as 無音測定 / NC check).
+        self.button_rescan = ttk.Button(
+            frm_src, text="再検出", command=self._on_rescan_devices
+        )
+        self.button_rescan.grid(row=0, column=2, sticky="we", padx=(6, 0), **row_pad)
+        attach_help(_HELP["rescan"], self.button_rescan)
         self._help(frm_src, 0, "mic", radio_mic)
 
         radio_loop = ttk.Radiobutton(
@@ -384,12 +449,13 @@ class _LauncherWindow:
         self.check_play_audio.grid(row=3, column=1, columnspan=2, sticky="w", **row_pad)
         self._help(frm_src, 3, "play_audio", self.check_play_audio)
 
-        if not self.pick_mic.devices or not self.pick_loopback.devices:
-            ttk.Label(
-                frm_src,
-                text="デバイス一覧を取得できませんでした — 番号または名前を直接入力してください",
-                foreground="#c60", font=self._font_small, wraplength=_WRAP_FULL,
-            ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        self.label_devices = ttk.Label(
+            frm_src, text=_ENUM_FAILED_TEXT,
+            foreground="#c60", font=self._font_small, wraplength=_WRAP_FULL,
+        )
+        self.label_devices.grid(row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        if self.pick_mic.devices and self.pick_loopback.devices:
+            self.label_devices.grid_remove()
 
         # --- silence gate / mic check -------------------------------------
         frm_sil = self._section(body, "無音検出・マイク確認")
@@ -585,6 +651,37 @@ class _LauncherWindow:
         # and applies whenever mic mode runs later, so the operator may
         # measure the hall while e.g. a wav-mode config is selected.
         # Measurement always captures from the mic picker's device.
+
+    def _on_rescan_devices(self) -> None:
+        # PortAudio terminate would pull the stream out from under a
+        # running measurement, so end it first (no threshold applied).
+        self._abort_measure()
+        reinitialize_portaudio()
+        mic_kept = self.pick_mic.set_devices(list_input_devices())
+        loop_kept = self.pick_loopback.set_devices(list_output_devices_wasapi())
+        self._on_source_changed()  # re-apply enabled state to rebuilt widgets
+
+        lost = [
+            label for label, kept in (("マイク", mic_kept), ("ループバック", loop_kept))
+            if not kept
+        ]
+        if not self.pick_mic.devices or not self.pick_loopback.devices:
+            text, color = _ENUM_FAILED_TEXT, "#c60"
+        elif lost:
+            text = (
+                f"選択中の{'・'.join(lost)}デバイスが見つかりません — "
+                "既定のデバイスに戻しました"
+            )
+            color = "#c00"
+        else:
+            text = (
+                f"再検出しました（入力 {len(self.pick_mic.devices)} / "
+                f"ループバック {len(self.pick_loopback.devices)} デバイス）"
+            )
+            color = "#080"
+        self.label_devices.configure(text=text, foreground=color)
+        self.label_devices.grid()
+        logger.info("Device rescan: %s", text)
 
     # ------------------------------------------------- silence measurement
     def _on_toggle_measure(self) -> None:

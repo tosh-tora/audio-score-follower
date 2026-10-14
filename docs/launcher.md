@@ -14,6 +14,7 @@ CLI フラグと config スキーマの詳細は **README.md が正本**。こ�
 - `launch_options.py` は Tk / sounddevice を import しない純ロジック層。CLI とランチャーの検証を共有する（`tests/test_launch_options.py` でヘッドレステスト可能）
 - config の保存は raw JSON の read→update→write（`ConfigLoader` 経由にしない — movements 検証で保存がブロックされるため）。`ensure_ascii=False` / `indent=2` / tempfile + `os.replace` でアトミック
 - デバイスは index + 名前スナップショットの両方を保存し、次回起動時に名前一致で index を再マッチする（Windows はデバイス番号が変動するため）
+- 「再検出」ボタンも同じ名前一致で選択を引き継ぐ。PortAudio は初期化時のデバイス一覧をキャッシュするので、再検出は `reinitialize_portaudio()`（terminate → initialize）してから列挙し直す。terminate は開いているストリームを無効にするため、無音測定中なら先に中断する
 
 > **触ってはいけない**: **`LaunchOptions.input_wav` を直接 app に渡さない。** ランチャーは wav 欄の前回値をソース切替後も保持・保存するため、`input_source=mic` でも `input_wav` が非 None になり得る。必ず `opts.effective_input_wav`（wav モード以外は None）を使う。渡すと wav モードで起動し「マイクを選んだのに監視無効・ボタンなしで自動追随」になる（実際に発生したバグ）
 
