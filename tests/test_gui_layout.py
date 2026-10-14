@@ -300,3 +300,61 @@ def test_tooltip_shows_on_hover_and_hides_on_leave(root):
     assert tip.tip is not None
     tip.toggle()
     assert tip.tip is None
+
+
+# ------------------------------------------------------ デバイス再検出
+# PortAudio は初期化時のデバイス一覧をキャッシュするので、ランチャー起動後に
+# 挿した USB I/F は「再検出」(terminate/initialize) まで一覧に出ない。
+
+def _rescan_with(win, monkeypatch, mic_devices, loop_devices=None):
+    from audio_score_follower.ui import launcher
+
+    monkeypatch.setattr(launcher, "reinitialize_portaudio", lambda: None)
+    monkeypatch.setattr(launcher, "list_input_devices", lambda: mic_devices)
+    if loop_devices is not None:
+        monkeypatch.setattr(launcher, "list_output_devices_wasapi", lambda: loop_devices)
+    win._on_rescan_devices()
+
+
+def test_rescan_adds_new_device_and_keeps_selection_by_name(root, tmp_path, monkeypatch):
+    win = _build_launcher(root, tmp_path, monkeypatch)
+    win.pick_mic.restore(1, _LONG_DEVICE)
+    # USB I/F を挿すと Windows はインデックスを振り直す
+    _rescan_with(win, monkeypatch, [
+        (0, "USB Audio I/F", "0: USB Audio I/F [MME]"),
+        (5, _LONG_DEVICE, f"5: {_LONG_DEVICE} [MME]"),
+    ])
+    assert win.pick_mic.value() == 5
+    assert "USB Audio I/F" in "".join(win.pick_mic.widget.cget("values"))
+    assert "再検出しました" in win.label_devices.cget("text")
+
+
+def test_rescan_reports_when_selected_device_disappeared(root, tmp_path, monkeypatch):
+    win = _build_launcher(root, tmp_path, monkeypatch)
+    win.pick_mic.restore(1, _LONG_DEVICE)
+    _rescan_with(win, monkeypatch, [(0, "Other Mic", "0: Other Mic [MME]")])
+    assert win.pick_mic.value() is None
+    assert "見つかりません" in win.label_devices.cget("text")
+
+
+def test_rescan_switches_between_entry_fallback_and_combobox(root, tmp_path, monkeypatch):
+    from tkinter import ttk
+
+    win = _build_launcher(root, tmp_path, monkeypatch)
+    _rescan_with(win, monkeypatch, [], [])
+    assert isinstance(win.pick_mic.widget, ttk.Entry)
+    assert win.pick_mic.value() is None
+    assert "取得できませんでした" in win.label_devices.cget("text")
+
+    _rescan_with(win, monkeypatch, [(2, "Mic", "2: Mic [MME]")],
+                 [(9, "Spk", "9: Spk [WASAPI]")])
+    assert isinstance(win.pick_mic.widget, ttk.Combobox)
+    assert win.pick_mic.widget.grid_info()["row"] == 0
+
+
+def test_rescan_aborts_running_measurement(root, tmp_path, monkeypatch):
+    win = _build_launcher(root, tmp_path, monkeypatch)
+    stopped = []
+    win._measure_monitor = type("M", (), {"stop": lambda self: stopped.append(1)})()
+    _rescan_with(win, monkeypatch, [(0, "Mic", "0: Mic [MME]")])
+    assert stopped == [1] and win._measure_monitor is None
