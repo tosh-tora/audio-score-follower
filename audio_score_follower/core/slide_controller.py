@@ -25,6 +25,13 @@ external monitor and goes fullscreen there, leaving the laptop screen to
 the operator console. With no external monitor it stays a normal window
 (rehearsal on a bare laptop).
 
+Video movements (config triggers with ``video``) use the same window:
+``set_mode("video")`` covers the screen with a fullscreen video layer
+(the deck underneath is only hidden, keeping its page), ``play_video``
+plays a scene from the top and leaves it on its last frame. Scene videos
+are muted, and each is probed at startup so a file this browser cannot
+decode is reported before the concert, not at its trigger.
+
 Action mapping
 --------------
 The existing config.json uses short action names ("right", "left", ...).
@@ -38,7 +45,8 @@ from __future__ import annotations
 import logging
 import queue
 import threading
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Sequence
 from urllib.parse import urlencode
 
 from audio_score_follower.ui.audience_panel import (
@@ -78,8 +86,9 @@ class SlideController:
 
     def __init__(
         self,
-        slide_url: str,
+        slide_url: Optional[str],
         *,
+        videos: Sequence[str] = (),
         headless: bool = False,
         viewport: Optional[dict] = None,
     ) -> None:
@@ -87,14 +96,24 @@ class SlideController:
         Args:
             slide_url: Google Slides URL (recommended: the ``/present?...``
                 variant so the page opens in presentation mode automatically).
+                None when the config only has video movements.
+            videos: Every scene video the config references. They are
+                probed once at startup so an undecodable file shows up in
+                rehearsal, not at its trigger in the concert.
             headless: Run Chromium without a UI window. Default False; set
                 True only for automated tests.
             viewport: Optional viewport dict (``{"width": ..., "height": ...}``).
                 Default uses the OS window size.
         """
         self.slide_url = slide_url
+        self.videos = list(videos)
         self.headless = headless
         self.viewport = viewport
+        # Startup probe failures, one human-readable line per bad file.
+        self.video_problems: list[str] = []
+        # Which layer the audience sees; only touched by the worker thread
+        # (commands apply in queue order, so reset follows the last mode).
+        self._mode = "slides"
 
         self._command_queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
         self._thread: Optional[threading.Thread] = None
@@ -149,8 +168,30 @@ class SlideController:
             self._command_queue.put(("panel", None))
 
     def reset_to_first(self) -> None:
-        """Queue a return to slide 1 (reloads the embed viewer)."""
+        """Queue a return to the start: slide 1, or black in video mode."""
         self._command_queue.put(("reset", None))
+
+    def set_mode(self, mode: str) -> None:
+        """Queue a switch of the audience screen: ``"slides"`` or ``"video"``.
+
+        Entering video mode starts from black. The deck is only hidden,
+        so returning to slides resumes on the page it was left at.
+        """
+        if mode not in ("slides", "video"):
+            raise ValueError(f"unknown audience mode: {mode!r}")
+        self._command_queue.put(("mode", mode))
+
+    def play_video(self, path: str, next_path: Optional[str] = None) -> None:
+        """Queue playing a scene video from the top (fullscreen, muted).
+
+        ``next_path`` is preloaded afterwards so the following scene
+        starts without a decode gap.
+        """
+        self._command_queue.put(("play", (path, next_path)))
+
+    def hold_video_end(self, path: Optional[str]) -> None:
+        """Queue showing a scene's last frame, still. None shows black."""
+        self._command_queue.put(("hold", path))
 
     def stop(self, timeout: float = 5.0) -> None:
         """Signal worker to close the browser and exit."""
@@ -199,12 +240,18 @@ class SlideController:
                 context = browser.new_context(**context_kwargs)
                 page = context.new_page()
 
-                embed_url = to_embed_url(self.slide_url)
-                host_url = f"{HOST_HTML.as_uri()}?{urlencode({'src': embed_url})}"
-                logger.info("Opening audience screen with slides: %s", embed_url)
+                host_url = HOST_HTML.as_uri()
+                if self.slide_url:
+                    embed_url = to_embed_url(self.slide_url)
+                    host_url += f"?{urlencode({'src': embed_url})}"
+                    logger.info("Opening audience screen with slides: %s", embed_url)
+                else:
+                    logger.info("Opening audience screen without slides (video only)")
                 page.goto(host_url, wait_until="domcontentloaded")
                 self._place_on_projector(context, page)
-                self._wait_slides_loaded(page)
+                if self.slide_url:
+                    self._wait_slides_loaded(page)
+                self._probe_videos(page)
 
                 self._ready_event.set()
                 logger.info("SlideController ready.")
@@ -233,9 +280,50 @@ class SlideController:
                             if view is not None:
                                 page.evaluate("v => window.asfUpdate(v)", view)
                         elif op == "reset":
-                            page.evaluate("() => window.asfResetSlides()")
-                            self._wait_slides_loaded(page)
-                            logger.info("Slides reset to slide 1")
+                            if self._mode == "video":
+                                page.evaluate("() => window.asfBlack()")
+                                logger.info("Video reset to black")
+                            else:
+                                page.evaluate("() => window.asfResetSlides()")
+                                self._wait_slides_loaded(page)
+                                logger.info("Slides reset to slide 1")
+                        elif op == "mode":
+                            self._mode = arg
+                            page.evaluate("m => window.asfSetMode(m)", arg)
+                            if arg == "video":
+                                page.evaluate("() => window.asfBlack()")
+                            else:
+                                _focus_slides(page)
+                            logger.info("Audience screen mode: %s", arg)
+                        elif op == "play":
+                            path, next_path = arg
+                            res = page.evaluate(
+                                "([u, n]) => window.asfPlay(u, n)",
+                                [_video_uri(path), _video_uri(next_path) if next_path else None],
+                            )
+                            if res["error"]:
+                                logger.error("動画を再生できません: %s (%s)", path, res["error"])
+                            else:
+                                logger.info("Playing video: %s", Path(path).name)
+                            if res["cut"]:
+                                # The scene was longer than this performance's
+                                # gap between triggers: shorten the file.
+                                logger.warning(
+                                    "前のシーンが終わる前に次のシーンへ切り替えました "
+                                    "(→ %s)。前のシーン動画を短くすることを検討してください",
+                                    Path(path).name,
+                                )
+                        elif op == "hold":
+                            if arg is None:
+                                page.evaluate("() => window.asfBlack()")
+                                logger.info("Video held on black")
+                            else:
+                                res = page.evaluate("u => window.asfHoldEnd(u)", _video_uri(arg))
+                                if res["error"]:
+                                    logger.error("動画の最終フレームを表示できません: %s (%s)",
+                                                 arg, res["error"])
+                                else:
+                                    logger.info("Holding last frame of: %s", Path(arg).name)
                         else:
                             logger.warning("Unknown slide controller command: %s", op)
                     except Exception as exc:  # noqa: BLE001
@@ -253,6 +341,16 @@ class SlideController:
         finally:
             self._ready_event.set()  # unblock waiters even on failure
             logger.info("SlideController worker exiting")
+
+    def _probe_videos(self, page) -> None:
+        """Check every scene video decodes in this browser; log durations."""
+        for path in self.videos:
+            res = page.evaluate("u => window.asfProbe(u)", _video_uri(path))
+            if res["ok"]:
+                logger.info("Video OK: %s (%.1fs)", Path(path).name, res["duration"])
+            else:
+                self.video_problems.append(f"{Path(path).name}: {res['error']}")
+                logger.error("動画を再生できません: %s (%s)", path, res["error"])
 
     @staticmethod
     def _wait_slides_loaded(page) -> None:
@@ -325,6 +423,11 @@ class SlideController:
         return f"SlideController(url={self.slide_url!r}, running={alive})"
 
 
+def _video_uri(path: str) -> str:
+    # host.html is itself a file:// page, so file:// videos are same-origin.
+    return Path(path).resolve().as_uri()
+
+
 def _focus_slides(page) -> None:
     # focus(), never click(): a click inside the embed viewer advances the
     # deck by one slide.
@@ -348,6 +451,17 @@ class NullSlideController:
 
     def reset_to_first(self) -> None:
         return None
+
+    def set_mode(self, mode: str) -> None:  # noqa: ARG002
+        return None
+
+    def play_video(self, path: str, next_path: Optional[str] = None) -> None:  # noqa: ARG002
+        return None
+
+    def hold_video_end(self, path: Optional[str]) -> None:  # noqa: ARG002
+        return None
+
+    video_problems: tuple = ()
 
     def press(self, action: str) -> None:
         # No log here — the canonical "slide press" log is emitted by

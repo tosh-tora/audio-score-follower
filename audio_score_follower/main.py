@@ -55,7 +55,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from audio_score_follower import launch_options
-from audio_score_follower.config.loader import ConfigError, ConfigLoader
+from audio_score_follower.config.loader import ConfigError, ConfigLoader, is_video_movement
 from audio_score_follower.core.audio_level import AudioLevelMonitor
 from audio_score_follower.core.cooldown_timer import CooldownTimer
 from audio_score_follower.core.follower_worker import FileWorker, FollowerWorker
@@ -195,8 +195,13 @@ class AudioScoreFollowerApp:
         # to decide between exiting and re-opening the launcher.
         self.return_to_launcher_requested = False
 
-        if slide_url:
-            self.slide_controller = SlideController(slide_url=slide_url)
+        # Scene videos of every video movement, probed once at startup.
+        videos = [
+            t["video"] for m in self.config.movements if is_video_movement(m)
+            for t in m["triggers"]
+        ]
+        if slide_url or videos:
+            self.slide_controller = SlideController(slide_url=slide_url, videos=videos)
         else:
             logger.warning(
                 "--slide-url 未指定: ドライランモードで起動します。"
@@ -319,6 +324,11 @@ class AudioScoreFollowerApp:
         elif not ready:
             warning = "スライドの読み込みが30秒以内に完了しませんでした。URL を確認してください。"
             logger.error(warning)
+            self.state.set_slide_controller_warning(warning)
+        elif self.slide_controller.video_problems:
+            warning = "再生できない動画があります: " + " / ".join(
+                self.slide_controller.video_problems
+            )
             self.state.set_slide_controller_warning(warning)
 
         self._bind_keys()
@@ -490,6 +500,8 @@ class AudioScoreFollowerApp:
         )
         if triggers:
             self.state.set_next_trigger(min(t["measure"] for t in triggers))
+        # Each movement shows its own layer; a video movement starts black.
+        self.slide_controller.set_mode("video" if is_video_movement(movement) else "slides")
 
         if self.input_wav is not None:
             self.worker = FileWorker(
