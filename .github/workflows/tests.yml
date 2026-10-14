@@ -17,6 +17,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          # Dependency install was ~half of each run (fresh downloads of
+          # librosa/numba/music21 every time). No requirements*.txt in
+          # this repo, so key the cache on pyproject.toml explicitly.
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         shell: pwsh
