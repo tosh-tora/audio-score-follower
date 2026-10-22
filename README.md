@@ -282,6 +282,8 @@ python -m audio_score_follower.main
 asf-follow
 ```
 
+Windows ではリポジトリ直下の `launch_gui.bat` をダブルクリックしても起動できる（異常終了時はウィンドウを閉じずにエラーを表示する）。
+
 | 項目 | 対応する CLI |
 |---|---|
 | 設定ファイル | 第1引数の config.json（`config/*.json` を列挙、前回使用したものをプリセレクト） |
