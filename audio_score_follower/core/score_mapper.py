@@ -11,11 +11,17 @@ Also provides beat-within-measure calculations for detailed position tracking.
 
 import bisect
 import logging
+import warnings
 from typing import Tuple
 
 import partitura
 
 logger = logging.getLogger(__name__)
+
+# 実楽譜の "(dim.)" や練習番号のような指示で読み込み 1 回につき大量に出て、本番の
+# コンソールで本物のエラーを埋もれさせる。partitura は読めない指示を飛ばすか Words に
+# 落として読み込みを続け、ここでは小節と拍子しか使わないので追随に影響しない。
+warnings.filterwarnings("ignore", category=UserWarning, module=r"partitura\.")
 
 
 class ScoreMapper:
