@@ -75,6 +75,10 @@ class ConfigLoader:
     deck is preloaded at startup, so moving to the next movement (N) swaps
     decks instantly — the gap between movements is short.
 
+    ``input_wav`` (optional, path relative to this file) is the recording
+    that movement plays in file-input mode; a CLI ``--input-wav`` overrides
+    it for every movement. The launcher edits both per movement.
+
     ``note`` (解説文) and ``author`` (解説を書いた人) are both optional
     free text on a trigger: neither is validated, and neither affects
     slide control — they exist so the operator can tell from the log
@@ -165,6 +169,13 @@ class ConfigLoader:
             # Whether the URL is really a Slides deck is checked when the
             # app resolves its decks (audience_panel.resolve_decks), which
             # reports it as a ConfigError before the browser opens.
+            # Existence is checked only when launching in file-input mode
+            # (launch_options.validate): mic mode never opens the file.
+            if "input_wav" in movement:
+                if not isinstance(movement["input_wav"], str) or not movement["input_wav"].strip():
+                    raise ConfigError(f"{mv}.input_wav: 音源ファイルのパス（文字列）が必要です")
+                movement["input_wav"] = self.resolve_path(movement["input_wav"])
+
             if "slide_url" in movement:
                 if not isinstance(movement["slide_url"], str) or not movement["slide_url"].strip():
                     raise ConfigError(f"{mv}.slide_url: Google スライドの URL（文字列）が必要です")

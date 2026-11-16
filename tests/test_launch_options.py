@@ -21,6 +21,7 @@ from audio_score_follower.launch_options import (
     default_config_dir,
     from_cli_args,
     read_launcher_settings,
+    read_movement_rows,
     rematch_device,
     resolve_input_wav,
     save_launcher_settings,
@@ -300,10 +301,12 @@ class TestPersistence:
         settings = json.loads(config_file.read_text(encoding="utf-8"))["settings"]
         launcher = settings["launcher"]
         assert launcher["input_source"] == "wav"
-        assert launcher["input_wav"] == str(wav)
         assert launcher["play_audio"] is True
         assert launcher["verbose"] is True
-        assert launcher["slide_url"] == "https://slides"
+        # Decks / recordings live per movement now (movement table); the
+        # launcher-level fields are never written.
+        assert "input_wav" not in launcher
+        assert "slide_url" not in launcher
         # Silence threshold is mic/venue-dependent and NOT persisted, even
         # when the LaunchOptions carries a value.
         assert "silence_threshold_db" not in settings
@@ -362,7 +365,6 @@ class TestReadLauncherSettings:
     def test_defaults_without_launcher_block(self, config_file):
         saved = read_launcher_settings(config_file)
         assert saved["input_source"] == INPUT_SOURCE_MIC
-        assert saved["slide_url"] is None
         assert saved["play_audio"] is False
         # The silence threshold is not read back from config (mic/venue
         # dependent) — always the default, ignoring the fixture's -48.0.
@@ -374,7 +376,7 @@ class TestReadLauncherSettings:
     def test_merged_after_save(self, config_file):
         opts = LaunchOptions(
             config_path=config_file, input_source=INPUT_SOURCE_LOOPBACK,
-            loopback_device=3, verbose=True, slide_url="https://s",
+            loopback_device=3, verbose=True,
         )
         save_launcher_settings(config_file, opts, loopback_device_name="Speakers")
         saved = read_launcher_settings(config_file)
@@ -382,7 +384,6 @@ class TestReadLauncherSettings:
         assert saved["loopback_device"] == 3
         assert saved["loopback_device_name"] == "Speakers"
         assert saved["verbose"] is True
-        assert saved["slide_url"] == "https://s"
 
     def test_syntax_error_raises_value_error(self, tmp_path):
         path = tmp_path / "broken.json"
@@ -521,3 +522,108 @@ class TestDefaultConfigDir:
         expected = Path(launch_options_module.__file__).resolve().parent.parent / "config"
         assert result == expected
         assert result.is_absolute()
+
+
+# ---------------------------------------------------------------- movement table
+def _multi_config(tmp_path: Path, launcher=None, **mv_extra) -> Path:
+    movements = [
+        {"id": 1, "xml_file": "../s/幻想1.mxl", "built_dir": "b1",
+         "triggers": [{"measure": 1}]},
+        {"id": 4, "xml_file": "../s/幻想4.mxl", "built_dir": "b4",
+         "triggers": [{"measure": 1}]},
+        {"id": 5, "built_dir": "b5", "triggers": [{"measure": 1, "video": "a.mp4"}]},
+    ]
+    for key, values in mv_extra.items():
+        for m, v in zip(movements, values):
+            if v is not None:
+                m[key] = v
+    data = {"settings": {"launcher": launcher or {}}, "movements": movements}
+    path = tmp_path / "multi.json"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+class TestMovementRows:
+    def test_rows_follow_movements(self, tmp_path):
+        path = _multi_config(tmp_path, slide_url=["https://a", None, None],
+                             input_wav=["1.mp3", "4.mp3", None])
+        rows = read_movement_rows(path)
+        assert [r.label for r in rows] == ["1: 幻想1", "4: 幻想4", "5: 楽譜自動検出"]
+        assert [r.slide_url for r in rows] == ["https://a", None, None]
+        assert [r.input_wav for r in rows] == ["1.mp3", "4.mp3", None]
+        assert [r.is_video for r in rows] == [False, False, True]
+
+    def test_legacy_slide_url_fills_slides_movements_without_their_own(self, tmp_path):
+        # 旧ランチャーの URL は全楽章共通のデッキだった → 自前の無いスライド楽章に入れる
+        path = _multi_config(tmp_path, launcher={"slide_url": "https://old"},
+                             slide_url=["https://own", None, None])
+        rows = read_movement_rows(path)
+        assert [r.slide_url for r in rows] == ["https://own", "https://old", None]
+
+    def test_legacy_wav_not_guessed_in_multi_movement_config(self, tmp_path):
+        # 複数楽章 config の旧 input_wav はどれか 1 楽章の録音 → 推測して入れない
+        path = _multi_config(tmp_path, launcher={"input_wav": "C:/rec/4.mp3"})
+        assert [r.input_wav for r in read_movement_rows(path)] == [None, None, None]
+
+    def test_legacy_wav_migrates_in_single_movement_config(self, config_file):
+        data = json.loads(config_file.read_text(encoding="utf-8"))
+        data["settings"]["launcher"] = {"input_wav": "C:/rec/5.mp3", "slide_url": "https://s"}
+        config_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        (row,) = read_movement_rows(config_file)
+        assert (row.slide_url, row.input_wav) == ("https://s", "C:/rec/5.mp3")
+
+    def test_save_writes_rows_into_movements_and_drops_legacy(self, tmp_path):
+        path = _multi_config(tmp_path, launcher={"slide_url": "https://old", "input_wav": "x"},
+                             input_wav=["stale.mp3", None, None])
+        rows = read_movement_rows(path)
+        rows[0].slide_url, rows[0].input_wav = "https://d1", None
+        rows[1].slide_url, rows[1].input_wav = "https://d4", "C:/rec/4.mp3"
+        rows[2].input_wav = "C:/rec/5.mp3"
+        save_launcher_settings(path, _mic_opts(path), movement_rows=rows)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        m1, m4, m5 = data["movements"]
+        assert m1["slide_url"] == "https://d1" and "input_wav" not in m1
+        assert (m4["slide_url"], m4["input_wav"]) == ("https://d4", "C:/rec/4.mp3")
+        assert "slide_url" not in m5 and m5["input_wav"] == "C:/rec/5.mp3"
+        assert "slide_url" not in data["settings"]["launcher"]
+        assert "input_wav" not in data["settings"]["launcher"]
+        # 保存後に読み直すと同じ表になる（旧キーからの再移行が起きない）
+        assert read_movement_rows(path) == rows
+
+    def test_save_refuses_rows_that_no_longer_match(self, tmp_path):
+        path = _multi_config(tmp_path)
+        rows = read_movement_rows(path)[:2]
+        with pytest.raises(ValueError, match="楽章の数"):
+            save_launcher_settings(path, _mic_opts(path), movement_rows=rows)
+
+
+class TestValidateMovementWavs:
+    def _wav_opts(self, path):
+        return LaunchOptions(config_path=path, input_source=INPUT_SOURCE_WAV)
+
+    def test_every_movement_needs_a_recording(self, tmp_path):
+        (tmp_path / "1.mp3").write_bytes(b"\x00")
+        path = _multi_config(tmp_path, input_wav=["1.mp3", "missing.mp3", None])
+        errors = validate(self._wav_opts(path))
+        assert len(errors) == 2
+        assert any("4: 幻想4" in e and "見つかりません" in e for e in errors)
+        assert any("5: 楽譜自動検出" in e and "指定されていません" in e for e in errors)
+
+    def test_edited_rows_are_checked_instead_of_the_file(self, tmp_path):
+        rec = tmp_path / "r.mp3"
+        rec.write_bytes(b"\x00")
+        path = _multi_config(tmp_path)
+        rows = read_movement_rows(path)
+        for r in rows:
+            r.input_wav = str(rec)
+        assert validate(self._wav_opts(path), movement_rows=rows) == []
+
+    def test_cli_input_wav_overrides_movements(self, tmp_path):
+        rec = tmp_path / "r.mp3"
+        rec.write_bytes(b"\x00")
+        path = _multi_config(tmp_path)
+        opts = LaunchOptions(config_path=path, input_source=INPUT_SOURCE_WAV, input_wav=rec)
+        assert validate(opts) == []
+
+    def test_mic_mode_ignores_missing_recordings(self, tmp_path):
+        assert validate(_mic_opts(_multi_config(tmp_path))) == []

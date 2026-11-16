@@ -101,6 +101,7 @@ class AudioScoreFollowerApp:
         slide_url: str | None,
         *,
         input_wav: Path | None = None,
+        file_input: bool = False,
         play_audio: bool = False,
         loopback: bool = False,
         loopback_device=None,
@@ -116,7 +117,11 @@ class AudioScoreFollowerApp:
 
         self.config = ConfigLoader(config_path)
         self.slide_url = slide_url
+        # File-input mode: each movement plays its own movements[].input_wav;
+        # input_wav (CLI --input-wav) overrides that for every movement —
+        # it is the diagnostic "track this other recording" switch.
         self.input_wav = input_wav
+        self._file_input = file_input or input_wav is not None
         self.play_audio = play_audio
         self.loopback = loopback
         self.viz = viz
@@ -159,7 +164,7 @@ class AudioScoreFollowerApp:
         # Manual performance start (mic mode only): the follower stays
         # frozen and ignores the silence gate until the operator presses
         # 「▶ 演奏開始」 (or L). wav/loopback modes auto-start as before.
-        self._mic_mode = input_wav is None and not loopback
+        self._mic_mode = not self._file_input and not loopback
         self._performance_started = not self._mic_mode
         # One-shot gate release (Issue #13): after the start press, the
         # FIRST sustained sound confirms the performance is underway and
@@ -287,7 +292,7 @@ class AudioScoreFollowerApp:
 
     # ---------------------------------------------------- lifecycle
     def run(self) -> None:
-        if self.input_wav is None and not self.loopback:
+        if self._mic_mode:
             logger.info("Launching AudioLevelMonitor …")
             # Surface the session gate threshold so the GUI can show it
             # next to the live dBFS readout — the operator can then see at
@@ -345,7 +350,7 @@ class AudioScoreFollowerApp:
         self.trigger_engine.start()
         self.root.after(_PANEL_POLL_MS, self._push_audience_panel)
 
-        if self.input_wav is None and not self.loopback:
+        if self._mic_mode:
             self.root.after(_GATE_POLL_MS, self._check_silence_gate)
         else:
             # File-input / loopback mode: no separate mic monitor stream.
@@ -400,7 +405,7 @@ class AudioScoreFollowerApp:
         if self.worker is not None:
             self.worker.stop()
             self.worker = None
-        if self.input_wav is None and not self.loopback:
+        if self._mic_mode:
             self.audio_monitor.stop()
         self.slide_controller.stop()
         logger.info("Shutdown complete")
@@ -455,6 +460,20 @@ class AudioScoreFollowerApp:
         # the loader at the original point so a bad reload keeps the
         # current worker running. Returns True on success so callers can
         # keep the movement index in sync with what actually loaded.
+        input_wav: Path | None = None
+        if self._file_input:
+            # Checked before the loader so a missing file keeps the
+            # current movement running, like any other load failure.
+            raw = self.input_wav or movement.get("input_wav")
+            input_wav = Path(raw) if raw else None
+            if input_wav is None or not input_wav.is_file():
+                msg = (
+                    f"楽章 {movement.get('id')}: 音源ファイルがありません"
+                    + (f" ({input_wav})" if input_wav else "（ランチャーの楽章表で指定）")
+                )
+                logger.error("%s", msg)
+                self.state.set_load_error(msg)
+                return False
         try:
             loaded = load_movement(
                 self.config,
@@ -513,11 +532,12 @@ class AudioScoreFollowerApp:
             self.slide_controller.show_deck(deck)
         self.slide_controller.set_mode("video" if is_video_movement(movement) else "slides")
 
-        if self.input_wav is not None:
+        if input_wav is not None:
+            logger.info("File input: %s", input_wav)
             self.worker = FileWorker(
                 oltw_follower=self.oltw,
                 feature_config=self.warp_lookup.feature_config,
-                input_wav=self.input_wav,
+                input_wav=input_wav,
                 on_result=self.result_handler.on_result,
                 realtime=True,
                 play_audio=self.play_audio,
@@ -948,6 +968,7 @@ def _run_app(opts: launch_options.LaunchOptions, *, allow_return_to_launcher: bo
             str(opts.config_path),
             slide_url=opts.slide_url,
             input_wav=opts.effective_input_wav,
+            file_input=(opts.input_source == launch_options.INPUT_SOURCE_WAV),
             play_audio=opts.play_audio,
             loopback=(opts.input_source == launch_options.INPUT_SOURCE_LOOPBACK),
             loopback_device=opts.loopback_device,
