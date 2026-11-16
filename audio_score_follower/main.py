@@ -77,7 +77,7 @@ from audio_score_follower.core.state_manager import AppState
 from audio_score_follower.core.trigger_engine import TriggerEngine
 from audio_score_follower.core.viz_feed import VizFeed, VizThresholds
 from audio_score_follower.core.warp_lookup import WarpLookup
-from audio_score_follower.ui.audience_panel import PanelView, build_panel_view
+from audio_score_follower.ui.audience_panel import PanelView, build_panel_view, resolve_decks
 from audio_score_follower.ui.gui_tkinter import FollowerGUI
 from audio_score_follower.ui.viz_window import VizWindow
 
@@ -200,8 +200,14 @@ class AudioScoreFollowerApp:
             t["video"] for m in self.config.movements if is_video_movement(m)
             for t in m["triggers"]
         ]
-        if slide_url or videos:
-            self.slide_controller = SlideController(slide_url=slide_url, videos=videos)
+        # Each slides movement shows its own deck (movements[].slide_url)
+        # or the --slide-url default; all are preloaded so N swaps instantly.
+        try:
+            decks, self._deck_index = resolve_decks(self.config.movements, slide_url)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+        if decks or videos:
+            self.slide_controller = SlideController(slide_urls=decks, videos=videos)
         else:
             logger.warning(
                 "--slide-url 未指定: ドライランモードで起動します。"
@@ -501,6 +507,10 @@ class AudioScoreFollowerApp:
         if triggers:
             self.state.set_next_trigger(min(t["measure"] for t in triggers))
         # Each movement shows its own layer; a video movement starts black.
+        # The deck is chosen first so entering slides mode reveals the right one.
+        deck = self._deck_index[self.config.current_movement_idx]
+        if deck is not None:
+            self.slide_controller.show_deck(deck)
         self.slide_controller.set_mode("video" if is_video_movement(movement) else "slides")
 
         if self.input_wav is not None:

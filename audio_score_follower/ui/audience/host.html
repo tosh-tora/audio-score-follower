@@ -2,7 +2,8 @@
 <!--
   Audience screen (Issue #8): Google Slides on the left, tracking panel on
   the right, in ONE Chromium window driven by core/slide_controller.py.
-  Opened as host.html?src=<.../embed URL>. The page only draws what
+  Opened as host.html?src=<.../embed URL>[&src=...] — one src per deck
+  (movements may each have their own deck). The page only draws what
   Python hands to window.asfUpdate(view) — all decisions live in
   ui/audience_panel.py so they stay testable.
 -->
@@ -15,7 +16,14 @@
     font-family: "Meiryo", "Yu Gothic UI", "Noto Sans CJK JP", sans-serif; }
   #wrap { display: flex; height: 100vh; }
   /* 1000 / 1280 of the production 1280x800 screen */
-  #slide { width: 78.125vw; height: 100vh; border: 0; display: block; background: #000; }
+  #decks { width: 78.125vw; height: 100vh; position: relative; flex: none; }
+  /* Every deck is loaded at startup and stacked here; switching movements
+     only changes which one is visible, so it is instant and each hidden
+     deck keeps its page. visibility, not display: a display:none iframe
+     has no size, and the viewer lays its slides out against it. */
+  .deck { position: absolute; inset: 0; width: 100%; height: 100%; border: 0;
+    display: block; background: #000; visibility: hidden; }
+  .deck.active { visibility: visible; }
   #panel { flex: 1; position: relative; display: flex; flex-direction: column;
     justify-content: center; align-items: center; gap: 1.5vh; text-align: center; }
   .label { font-size: 2.6vh; color: #aaa; }
@@ -70,7 +78,8 @@
      deck keeps its page across a video movement. */
   #videos { position: fixed; inset: 0; background: #000; display: none; }
   body[data-mode="video"] #videos { display: block; }
-  body[data-mode="video"] #wrap { visibility: hidden; }
+  body[data-mode="video"] #wrap,
+  body[data-mode="video"] .deck.active { visibility: hidden; }
   #videos video { position: absolute; inset: 0; width: 100%; height: 100%;
     object-fit: contain; opacity: 0; transition: opacity 0.6s ease; }
   #videos video.front { opacity: 1; }
@@ -78,7 +87,7 @@
 </head>
 <body>
 <div id="wrap">
-  <iframe id="slide" allow="autoplay; fullscreen"></iframe>
+  <div id="decks"></div>
   <div id="panel">
     <div class="label">小節</div>
     <div class="big" id="measure">--</div>
@@ -168,21 +177,41 @@
   <video muted playsinline preload="auto"></video>
 </div>
 <script>
-  const src = new URLSearchParams(location.search).get("src");
-  const slide = document.getElementById("slide");
-  // Reloading the iframe is how the deck returns to slide 1 (the embed
-  // viewer always opens at the first slide).
-  // asfSlidesLoaded resolves on the iframe's load event; Python awaits it
-  // before focusing the deck.
-  window.asfResetSlides = () => {
-    window.asfSlidesLoaded = new Promise((resolve) =>
-      slide.addEventListener("load", resolve, { once: true }));
+  const srcs = new URLSearchParams(location.search).getAll("src");
+  // A video-only config has no deck; keep one blank frame so there is
+  // always an active deck to focus.
+  const frames = (srcs.length ? srcs : [null]).map(() => {
+    const f = document.createElement("iframe");
+    f.className = "deck";
+    f.allow = "autoplay; fullscreen";
+    document.getElementById("decks").appendChild(f);
+    return f;
+  });
+  let active = 0;
+  frames[active].classList.add("active");
+  // Which decks have finished loading, for the startup report.
+  window.asfDeckLoaded = frames.map(() => false);
+
+  // Reloading an iframe is how a deck returns to slide 1 (the embed
+  // viewer always opens at the first slide). Resolves on its load event.
+  const reload = (i) => new Promise((resolve) => {
+    frames[i].addEventListener("load", () => {
+      window.asfDeckLoaded[i] = true;
+      resolve();
+    }, { once: true });
     // The viewer keeps its position in the URL fragment (#slide=...), so
     // re-assigning the same src could be a same-document fragment hop;
     // a fresh query value forces a real reload back to slide 1.
-    slide.src = src ? `${src}&_r=${Date.now()}` : "about:blank";
+    frames[i].src = srcs[i] ? `${srcs[i]}&_r=${Date.now()}` : "about:blank";
+  });
+  // asfSlidesLoaded is what Python awaits before focusing the deck: all
+  // decks at startup, only the reloaded one after a reset.
+  window.asfSlidesLoaded = Promise.all(frames.map((_, i) => reload(i)));
+  window.asfResetSlides = () => { window.asfSlidesLoaded = reload(active); };
+  window.asfShowDeck = (i) => {
+    active = i;
+    frames.forEach((f, j) => f.classList.toggle("active", j === i));
   };
-  window.asfResetSlides();
 
   window.asfUpdate = (v) => {
     document.getElementById("measure").textContent = v.measure;

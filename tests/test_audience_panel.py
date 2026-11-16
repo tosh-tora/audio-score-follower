@@ -8,6 +8,7 @@ from audio_score_follower.ui.audience_panel import (
     LOST_CONFIDENCE_SEC,
     build_panel_view,
     pick_presentation_screen,
+    resolve_decks,
     resolve_status,
     to_embed_url,
 )
@@ -144,6 +145,42 @@ def test_to_embed_url(url, expected):
 def test_to_embed_url_rejects_non_slides(url):
     with pytest.raises(ValueError):
         to_embed_url(url)
+
+
+# ------------------------------------------------- 楽章ごとのデッキ
+DECK = "https://docs.google.com/presentation/d/{}/edit"
+
+
+def _mv(slide_url=None, video=False):
+    m = {"triggers": [{"measure": 1, "video": "a.mp4"} if video else {"measure": 1}]}
+    if slide_url:
+        m["slide_url"] = slide_url
+    return m
+
+
+def test_resolve_decks_falls_back_to_default():
+    decks, index = resolve_decks([_mv(), _mv(DECK.format("B"))], DECK.format("A"))
+    assert decks == [to_embed_url(DECK.format("A")), to_embed_url(DECK.format("B"))]
+    assert index == [0, 1]
+
+
+def test_resolve_decks_shares_one_deck_across_url_forms():
+    # 同じデッキの /edit と /present は 1 つの iframe を共有する（ページ位置を引き継ぐ）
+    present = "https://docs.google.com/presentation/d/A/present"
+    decks, index = resolve_decks([_mv(DECK.format("A")), _mv(present), _mv()], None)
+    assert decks == [to_embed_url(present)]
+    assert index == [0, 0, None]
+
+
+def test_resolve_decks_skips_video_movements():
+    decks, index = resolve_decks([_mv(video=True), _mv()], DECK.format("A"))
+    assert decks == [to_embed_url(DECK.format("A"))]
+    assert index == [None, 0]
+
+
+def test_resolve_decks_names_the_bad_movement():
+    with pytest.raises(ValueError, match=r"movements\[1\]\.slide_url"):
+        resolve_decks([_mv(), _mv("https://example.com/x")], DECK.format("A"))
 
 
 # ------------------------------------------------ 確信度による状態の格下げ

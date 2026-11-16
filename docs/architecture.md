@@ -39,8 +39,8 @@ AppState → ui/audience_panel.py → SlideController → 聴衆向け画面の�
 | トリガー発火ループ・手動 →/← オーバライド | `core/trigger_engine.py` |
 | OLTW 結果処理（小節マッピング・AppState 反映・viz push・表示確信度・ジャンプ検出） | `core/result_handler.py`（worker スレッドから毎フレーム呼ばれる） |
 | 楽章ロードの純構築部（失敗は `MovementLoadError`） | `core/movement_loader.py` |
-| 聴衆向け画面（`ui/audience/host.html`: 左に Slides `/embed` の iframe、右に追随パネル）の Playwright 操作。外部モニターへの全画面配置、キュー経由の thread-safe キー送出・パネル更新・1 枚目リセット、動画の楽章の表示切替（`set_mode`）・シーン再生・起動時の動画プローブ | `core/slide_controller.py`（動画レイヤーの描画は `ui/audience/host.html`） |
-| 聴衆向けパネルの表示内容（状態判定・確信度 1 秒更新・「人が調整！」）、モニター選択、`/embed` URL 変換（Tk / Playwright 非依存の純ロジック） | `ui/audience_panel.py` |
+| 聴衆向け画面（`ui/audience/host.html`: 左に Slides `/embed` の iframe（デッキごとに 1 枚、重ねて表示中の 1 枚以外は隠す）、右に追随パネル）の Playwright 操作。外部モニターへの全画面配置、キュー経由の thread-safe キー送出・パネル更新・1 枚目リセット・デッキ切替（`show_deck`）、動画の楽章の表示切替（`set_mode`）・シーン再生・起動時の動画プローブ | `core/slide_controller.py`（動画レイヤーの描画は `ui/audience/host.html`） |
+| 聴衆向けパネルの表示内容（状態判定・確信度 1 秒更新・「人が調整！」）、モニター選択、`/embed` URL 変換、楽章 → デッキの解決（`resolve_decks`）（Tk / Playwright 非依存の純ロジック） | `ui/audience_panel.py` |
 | トリガーの小節単位クールダウン | `core/cooldown_timer.py` |
 | FluidSynth / SoundFont 検出の一本化 | `core/synth_locator.py`（**検出順を変えるときはここだけ触る**） |
 | GUI ↔ ワーカースレッド間の atomic 状態 | `core/state_manager.py` (`AppState`) |
@@ -76,7 +76,8 @@ AppState → ui/audience_panel.py → SlideController → 聴衆向け画面の�
 - `TriggerEngine` の専用スレッドが `_TRIGGER_POLL_HZ` (20Hz) で現在小節を監視
 - **発火条件（全て AND）**: ①小節一致 ②smoothed confidence ≥ `_TRIGGER_CONFIDENCE_FLOOR` (0.30) ③mismatch フラグが立っていない ④`CooldownTimer` が許可 ⑤その小節が未発火 ⑥`state.performance_ended` が False
 - `_TRIGGER_CONFIDENCE_FLOOR` (0.30) が `lock_in_confidence` (0.45) より**意図的に低い**理由: 旧 InertiaEngine が担っていた「整列が安定するまで発火しない」ガードの代替で、起動直後の measure-1 誤発火だけ防げばよいため
-- `--slide-url` 省略時（かつ動画の楽章も無いとき）は `NullSlideController`（no-op）で**ドライラン**起動
+- `--slide-url` も `movements[].slide_url` も無いとき（かつ動画の楽章も無いとき）は `NullSlideController`（no-op）で**ドライラン**起動
+- **楽章ごとのデッキ**（`movements[].slide_url`、無ければ `--slide-url`）: `resolve_decks` が重複なしのデッキ一覧と楽章ごとの番号を決め、全デッキを起動時に並行で読み込んでおく。楽章ロード時に `main._load_movement` が `show_deck` → `set_mode` の順で呼ぶ（楽章間が短いので、切替は表示の入れ替えだけで再読み込みしない）。R の `reset_to_first` は表示中のデッキだけを再読み込みする
 - **動画の楽章**（トリガーに `video`。1 楽章は全トリガー video か全部無しかのどちらか）: `execute_action` はキーを送らず `_show_scene` に回す。"right" は **発火したトリガー自身の動画**を再生する（「次のファイル」ではないので、小節ジャンプで途中のトリガーが飛んでも後続がずれない）。"left"（手動 ←）は取り消したトリガーの 1 つ前の動画の最終フレームで静止（再生し直すとシーン内のコメントが二重に出る）。楽章ロード時に `main._load_movement` が `set_mode` で画面を切り替える。デッキの iframe は隠すだけなので、動画の楽章を挟んでもページ位置は保たれる
 - 手動オーバライド: →/Space で次の未発火トリガーへ進めて発火済みにマーク + OLTW seek、← で直前の発火を取り消して戻る（発火順は小節順管理）
 

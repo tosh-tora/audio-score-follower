@@ -48,6 +48,7 @@ class ConfigLoader:
               "id": 1,
               "xml_file": "beethoven5.xml",
               "built_dir": "../data/built/beethoven5_karajan",
+              "slide_url": "https://docs.google.com/presentation/d/<ID>/edit",
               "triggers": [
                 {"measure": 1, "action": "right", "note": "開始"},
                 {"measure": 45, "action": "right", "note": "テーマA",
@@ -68,6 +69,11 @@ class ConfigLoader:
     this file, resolved to an absolute path here) instead of pressing a
     key on the deck. A movement is all-video or all-slides; the audience
     screen switches between the two when the movement loads.
+
+    ``slide_url`` (optional, slides movements only) gives the movement its
+    own deck; without it the movement uses the ``--slide-url`` deck. Every
+    deck is preloaded at startup, so moving to the next movement (N) swaps
+    decks instantly — the gap between movements is short.
 
     ``note`` (解説文) and ``author`` (解説を書いた人) are both optional
     free text on a trigger: neither is validated, and neither affects
@@ -155,6 +161,18 @@ class ConfigLoader:
                     f"{mv}.triggers: 'video' 付きと無しのトリガーが混在しています。"
                     f"1 楽章はスライドか動画のどちらか一方にしてください"
                 )
+
+            # Whether the URL is really a Slides deck is checked when the
+            # app resolves its decks (audience_panel.resolve_decks), which
+            # reports it as a ConfigError before the browser opens.
+            if "slide_url" in movement:
+                if not isinstance(movement["slide_url"], str) or not movement["slide_url"].strip():
+                    raise ConfigError(f"{mv}.slide_url: Google スライドの URL（文字列）が必要です")
+                if with_video:
+                    raise ConfigError(
+                        f"{mv}.slide_url: 動画の楽章には指定できません"
+                        f"（動画の楽章はスライドを表示しない）"
+                    )
 
             for t_idx, trig in enumerate(triggers):
                 tp = f"{mv}.triggers[{t_idx}]"
