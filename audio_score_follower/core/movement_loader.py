@@ -21,9 +21,10 @@ the missing-keys case, which historically only logged).
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple
 
 from audio_score_follower.core.oltw_follower import OnlineDTWFollower
 from audio_score_follower.core.score_mapper import ScoreMapper
@@ -46,6 +47,49 @@ class MovementLoadError(Exception):
     def __init__(self, state_message: Optional[str]) -> None:
         super().__init__(state_message or "movement load failed")
         self.state_message = state_message
+
+
+# Parsing a MusicXML score with partitura takes seconds per movement, and
+# _load_movement runs on the Tk main thread: the console froze after N, the
+# operator pressed again, and every queued press loaded one more movement
+# (skipping movements). The score is fixed during a concert and ScoreMapper
+# is read-only after construction, so parse once — prewarmed in the
+# background at startup (prewarm_scores) — and reuse. The mtime in the key
+# makes R pick up a replaced score file.
+_score_cache: Dict[Tuple[str, float], ScoreMapper] = {}
+# Held while parsing: a prewarm and an N press for the same score must not
+# parse it twice — the N press just waits for the prewarm to finish it.
+_score_lock = threading.Lock()
+
+
+def get_score_mapper(xml_file: Path) -> ScoreMapper:
+    """Return the (cached) ScoreMapper for ``xml_file``."""
+    path = Path(xml_file).resolve()
+    key = (str(path), path.stat().st_mtime)
+    with _score_lock:
+        mapper = _score_cache.get(key)
+        if mapper is None:
+            mapper = ScoreMapper(str(path))
+            _score_cache[key] = mapper
+        return mapper
+
+
+def prewarm_scores(config: "ConfigLoader") -> None:
+    """Parse every movement's score into the cache (background thread).
+
+    Failures only log: the error surfaces through the normal load path
+    when the operator actually reaches that movement.
+    """
+    for movement in config.movements:
+        raw = movement.get("xml_file")
+        if not raw:
+            continue
+        xml_file = Path(config.resolve_path(raw))
+        try:
+            get_score_mapper(xml_file)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Score prewarm skipped %s: %s", xml_file, exc)
+    logger.info("Score prewarm complete (%d movements)", len(config.movements))
 
 
 @dataclass
@@ -98,7 +142,7 @@ def load_movement(
     stop_previous()
 
     try:
-        score_mapper = ScoreMapper(str(xml_file))
+        score_mapper = get_score_mapper(xml_file)
         warp_lookup = WarpLookup.load(built_dir)
         reference_cens = load_reference_cens(built_dir)
         reference_onset = load_reference_onset(built_dir)

@@ -63,6 +63,7 @@ from audio_score_follower.core.mic_effects_probe import probe_capture_effects
 from audio_score_follower.core.movement_loader import (
     MovementLoadError,
     load_movement,
+    prewarm_scores,
 )
 from audio_score_follower.core.oltw_follower import OnlineDTWFollower
 from audio_score_follower.core.result_handler import (
@@ -346,6 +347,13 @@ class AudioScoreFollowerApp:
 
         logger.info("Loading first movement …")
         self._load_current_movement()
+        # Parse the other movements' scores now, while the first one waits
+        # for its start press, so N / P switch without freezing the console
+        # (see movement_loader.get_score_mapper).
+        threading.Thread(
+            target=prewarm_scores, args=(self.config,),
+            daemon=True, name="score-prewarm",
+        ).start()
 
         self.trigger_engine.start()
         self.root.after(_PANEL_POLL_MS, self._push_audience_panel)

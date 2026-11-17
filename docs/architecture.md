@@ -38,7 +38,7 @@ AppState → ui/audience_panel.py → SlideController → 聴衆向け画面の�
 | Tkinter 起動・composition root・キーバインド・silence-gate poll | `main.py`（各エンジンを配線する薄い orchestrator） |
 | トリガー発火ループ・手動 →/← オーバライド | `core/trigger_engine.py` |
 | OLTW 結果処理（小節マッピング・AppState 反映・viz push・表示確信度・ジャンプ検出） | `core/result_handler.py`（worker スレッドから毎フレーム呼ばれる） |
-| 楽章ロードの純構築部（失敗は `MovementLoadError`） | `core/movement_loader.py` |
+| 楽章ロードの純構築部（失敗は `MovementLoadError`）。楽譜（`ScoreMapper`）は起動時に全楽章ぶん裏で先読みしてキャッシュし、N / P / R ではパースしない（`get_score_mapper` / `prewarm_scores`） | `core/movement_loader.py` |
 | 聴衆向け画面（`ui/audience/host.html`: 左に Slides `/embed` の iframe（デッキごとに 1 枚、重ねて表示中の 1 枚以外は隠す）、右に追随パネル）の Playwright 操作。外部モニターへの全画面配置、キュー経由の thread-safe キー送出・パネル更新・1 枚目リセット・デッキ切替（`show_deck`）、動画の楽章の表示切替（`set_mode`）・シーン再生・起動時の動画プローブ | `core/slide_controller.py`（動画レイヤーの描画は `ui/audience/host.html`） |
 | 聴衆向けパネルの表示内容（状態判定・確信度 1 秒更新・「人が調整！」）、モニター選択、`/embed` URL 変換、楽章 → デッキの解決（`resolve_decks`）（Tk / Playwright 非依存の純ロジック） | `ui/audience_panel.py` |
 | トリガーの小節単位クールダウン | `core/cooldown_timer.py` |
