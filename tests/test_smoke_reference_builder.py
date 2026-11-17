@@ -89,6 +89,9 @@ def test_build_reference_smoke(tmp_path):
     import json
     meta = json.loads((out_dir / "build_meta.json").read_text(encoding="utf-8"))
     assert meta.get("has_onset") is True
+    # ビルド画面が「上書きされるビルドの入力」を表示するために記録する
+    assert meta["reference_path"] == str(ref_path.resolve())
+    assert meta["score_path"] is None  # score_path 未指定（MusicXML なしの合成 wav 直渡し）
 
 
 def test_build_reference_recovers_known_tempo_warp(tmp_path):

@@ -68,9 +68,11 @@ class LaunchOptions:
     mode has no flag; adjust at runtime with ↑/↓). ``cooldown_seconds``
     is still a launcher-only config field (None = leave config untouched).
 
-    ``input_wav`` may be non-None even when ``input_source`` is not
-    "wav": the launcher keeps the last-used file path in its form (and
-    persists it) so switching back to wav mode doesn't lose it.
+    ``input_wav`` is the CLI ``--input-wav`` (one recording for every
+    movement). The launcher leaves it None: in wav mode each movement
+    plays its own ``movements[].input_wav``, which the launcher's movement
+    table writes into the config (``save_launcher_settings``). It may
+    still be non-None while ``input_source`` is not "wav".
     Consumers MUST use ``effective_input_wav`` — passing a raw
     ``input_wav`` to the app while the source is mic silently launches
     file mode (auto-start, no silence gate), which manifested as
@@ -158,8 +160,14 @@ def coerce_device(value: DeviceSpec) -> DeviceSpec:
         return value
 
 
-def validate(opts: LaunchOptions) -> list[str]:
-    """Return a list of Japanese error messages; empty when launchable."""
+def validate(
+    opts: LaunchOptions, movement_rows: Optional[list["MovementRow"]] = None
+) -> list[str]:
+    """Return a list of Japanese error messages; empty when launchable.
+
+    ``movement_rows``: the launcher's edited (not yet saved) movement
+    table; None reads the rows from the config file (CLI path).
+    """
     errors: list[str] = []
     if opts.config_path is None or not Path(opts.config_path).exists():
         errors.append(f"Config not found: {opts.config_path}")
@@ -169,10 +177,11 @@ def validate(opts: LaunchOptions) -> list[str]:
             f"(mic / loopback / wav のいずれか)"
         )
     if opts.input_source == INPUT_SOURCE_WAV:
-        if opts.input_wav is None:
-            errors.append("音源ファイルが指定されていません")
-        elif not opts.input_wav.exists():
-            errors.append(f"--input-wav not found: {opts.input_wav}")
+        if opts.input_wav is not None:
+            if not opts.input_wav.exists():
+                errors.append(f"--input-wav not found: {opts.input_wav}")
+        elif opts.config_path is not None and Path(opts.config_path).exists():
+            errors.extend(_missing_movement_wavs(Path(opts.config_path), movement_rows))
     if opts.play_audio and opts.input_source != INPUT_SOURCE_WAV:
         errors.append("--play-audio は --input-wav と組み合わせて使用してください")
     lo, hi = SILENCE_MARGIN_DB_RANGE
@@ -183,6 +192,28 @@ def validate(opts: LaunchOptions) -> list[str]:
             f"無音測定マージンが不正です: {opts.silence_margin_db!r} "
             f"({lo:.0f}〜{hi:.0f} dB の範囲で指定してください)"
         )
+    return errors
+
+
+def _missing_movement_wavs(
+    config_path: Path, rows: Optional[list["MovementRow"]]
+) -> list[str]:
+    """File-input mode without --input-wav: every movement needs its file.
+
+    All movements, not just the first: a gap would only surface at the
+    N press between movements, mid-rehearsal.
+    """
+    if rows is None:
+        try:
+            rows = read_movement_rows(config_path)
+        except (ValueError, OSError):
+            return []  # the launcher already shows config read errors
+    errors = []
+    for row in rows:
+        if not row.input_wav:
+            errors.append(f"楽章 {row.label}: 音源ファイルが指定されていません")
+        elif not _resolve_against(config_path, row.input_wav).is_file():
+            errors.append(f"楽章 {row.label}: 音源ファイルが見つかりません: {row.input_wav}")
     return errors
 
 
@@ -214,8 +245,6 @@ def from_cli_args(args) -> LaunchOptions:
 
 _LAUNCHER_DEFAULTS = {
     "input_source": INPUT_SOURCE_MIC,
-    "slide_url": None,
-    "input_wav": None,
     "play_audio": False,
     "verbose": False,
     "viz": False,
@@ -286,12 +315,77 @@ def read_launcher_settings(config_path: Path) -> dict:
     return merged
 
 
+@dataclass
+class MovementRow:
+    """One row of the launcher's per-movement table (slide deck + recording).
+
+    Blank values are None. ``is_video``: the movement plays scene videos,
+    so it has no deck.
+    """
+
+    label: str
+    slide_url: Optional[str] = None
+    input_wav: Optional[str] = None
+    is_video: bool = False
+
+
+def _resolve_against(config_path: Path, raw: str) -> Path:
+    # Same rule as ConfigLoader.resolve_path: relative to the config file.
+    p = Path(raw)
+    return p if p.is_absolute() else Path(config_path).resolve().parent / p
+
+
+def _blank_to_none(value) -> Optional[str]:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def read_movement_rows(config_path: Path) -> list[MovementRow]:
+    """Read the per-movement slide URL / recording rows from a config.json.
+
+    Raw JSON (no ConfigLoader validation), like read_launcher_settings.
+    Migrates the pre-table launcher fields: a legacy ``settings.launcher``
+    slide URL fills every slides movement without its own (it used to be
+    their shared deck); a legacy recording fills the movement only when
+    there is exactly one — in a multi-movement config it belonged to one
+    movement, and guessing which would play the wrong music.
+    """
+    with open(config_path, "r", encoding="utf-8") as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"JSON 構文エラー: {exc.msg} (行 {exc.lineno}, 列 {exc.colno})"
+            ) from exc
+    settings = data.get("settings") if isinstance(data.get("settings"), dict) else {}
+    launcher = settings.get("launcher") if isinstance(settings.get("launcher"), dict) else {}
+    movements = data.get("movements", [])
+    if not isinstance(movements, list):
+        return []
+    movements = [m for m in movements if isinstance(m, dict)]
+    legacy_url = _blank_to_none(launcher.get("slide_url"))
+    legacy_wav = _blank_to_none(launcher.get("input_wav")) if len(movements) == 1 else None
+
+    rows = []
+    for i, m in enumerate(movements):
+        triggers = m.get("triggers") if isinstance(m.get("triggers"), list) else []
+        is_video = any(isinstance(t, dict) and "video" in t for t in triggers)
+        score = Path(str(m["xml_file"])).stem if m.get("xml_file") else "楽譜自動検出"
+        rows.append(MovementRow(
+            label=f"{m.get('id', i + 1)}: {score}",
+            slide_url=None if is_video else (_blank_to_none(m.get("slide_url")) or legacy_url),
+            input_wav=_blank_to_none(m.get("input_wav")) or legacy_wav,
+            is_video=is_video,
+        ))
+    return rows
+
+
 def save_launcher_settings(
     config_path: Path,
     opts: LaunchOptions,
     *,
     mic_device_name: Optional[str] = None,
     loopback_device_name: Optional[str] = None,
+    movement_rows: Optional[list[MovementRow]] = None,
 ) -> None:
     """Persist launcher selections back into the selected config.json.
 
@@ -306,10 +400,24 @@ def save_launcher_settings(
     with open(config_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     settings = data.setdefault("settings", {})
+    # Rows (read_movement_rows, as edited) go to movements[i].slide_url /
+    # input_wav, where the app reads them; blank removes the key. The
+    # legacy launcher-level slide URL / recording is not written back.
+    if movement_rows is not None:
+        movements = [m for m in data.get("movements", []) if isinstance(m, dict)]
+        if len(movements) != len(movement_rows):
+            raise ValueError(
+                "楽章の数が読み込み時から変わっています。設定ファイルを選び直してください"
+            )
+        for movement, row in zip(movements, movement_rows):
+            for key, value in (("slide_url", row.slide_url), ("input_wav", row.input_wav)):
+                value = _blank_to_none(value)
+                if value is None or (key == "slide_url" and row.is_video):
+                    movement.pop(key, None)
+                else:
+                    movement[key] = value
     settings["launcher"] = {
         "input_source": opts.input_source,
-        "slide_url": opts.slide_url or None,
-        "input_wav": str(opts.input_wav) if opts.input_wav is not None else None,
         "play_audio": bool(opts.play_audio),
         "verbose": bool(opts.verbose),
         "viz": bool(opts.viz),

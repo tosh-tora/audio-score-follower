@@ -26,6 +26,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
+from audio_score_follower.config.loader import is_video_movement
 from audio_score_follower.ui.common import confidence_level
 
 HOST_HTML = Path(__file__).parent / "audience" / "host.html"
@@ -204,3 +205,35 @@ def to_embed_url(slide_url: str) -> str:
         f"https://docs.google.com/presentation/d/{prefix}{deck_id}"
         "/embed?rm=minimal&start=false&loop=false"
     )
+
+
+def resolve_decks(
+    movements: list[dict], default_url: Optional[str]
+) -> tuple[list[str], list[Optional[int]]]:
+    """Decide which deck each movement shows.
+
+    Returns ``(decks, index)``: the distinct embed URLs to preload, in
+    first-use order, and per movement the position of its deck in
+    ``decks`` (None for a video movement, or a slides movement with
+    neither its own ``slide_url`` nor a default — the dry-run case).
+
+    Movements naming the same deck (in any URL form) share one entry, so
+    the deck keeps its page across them, as with a single-deck config.
+    Raises ValueError naming the movement whose URL is not a Slides deck.
+    """
+    decks: list[str] = []
+    index: list[Optional[int]] = []
+    for i, movement in enumerate(movements):
+        url = movement.get("slide_url") or default_url
+        if is_video_movement(movement) or not url:
+            index.append(None)
+            continue
+        try:
+            embed = to_embed_url(url)
+        except ValueError as exc:
+            where = f"movements[{i}].slide_url" if movement.get("slide_url") else "--slide-url"
+            raise ValueError(f"{where}: {exc}") from exc
+        if embed not in decks:
+            decks.append(embed)
+        index.append(decks.index(embed))
+    return decks, index

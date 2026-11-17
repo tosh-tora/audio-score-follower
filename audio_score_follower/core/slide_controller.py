@@ -11,16 +11,20 @@ single-threaded by design).
 
 Typical lifecycle::
 
-    sc = SlideController(slide_url="https://docs.google.com/presentation/d/.../present")
+    sc = SlideController(slide_urls=[deck1_embed, deck2_embed])
     sc.start()
     sc.wait_ready(timeout=30.0)
     sc.press("right")           # advance one slide
     sc.update_panel(view.to_js())
-    sc.reset_to_first()         # back to slide 1
+    sc.show_deck(1)             # next movement's deck
+    sc.reset_to_first()         # back to slide 1 of the shown deck
     sc.stop()
 
-Any URL of the deck works; it is rewritten to ``/embed`` because
-``/present`` refuses to be framed. On startup the window moves to the
+Any URL of a deck works; it is rewritten to ``/embed`` because
+``/present`` refuses to be framed. A config may give each movement its
+own deck (``audience_panel.resolve_decks``). Every deck is loaded at
+startup and kept in the page, so ``show_deck`` only swaps which one is
+visible: the gap between movements is too short to wait for a load. On startup the window moves to the
 external monitor and goes fullscreen there, leaving the laptop screen to
 the operator console. With no external monitor it stays a normal window
 (rehearsal on a bare laptop).
@@ -86,7 +90,7 @@ class SlideController:
 
     def __init__(
         self,
-        slide_url: Optional[str],
+        slide_urls: Sequence[str] = (),
         *,
         videos: Sequence[str] = (),
         headless: bool = False,
@@ -94,9 +98,9 @@ class SlideController:
     ) -> None:
         """
         Args:
-            slide_url: Google Slides URL (recommended: the ``/present?...``
-                variant so the page opens in presentation mode automatically).
-                None when the config only has video movements.
+            slide_urls: Google Slides URLs of every deck, in the order
+                ``show_deck`` indexes them (the first is shown at
+                startup). Empty when the config only has video movements.
             videos: Every scene video the config references. They are
                 probed once at startup so an undecodable file shows up in
                 rehearsal, not at its trigger in the concert.
@@ -105,7 +109,7 @@ class SlideController:
             viewport: Optional viewport dict (``{"width": ..., "height": ...}``).
                 Default uses the OS window size.
         """
-        self.slide_url = slide_url
+        self.slide_urls = list(slide_urls)
         self.videos = list(videos)
         self.headless = headless
         self.viewport = viewport
@@ -167,8 +171,16 @@ class SlideController:
         if not already_queued:
             self._command_queue.put(("panel", None))
 
+    def show_deck(self, index: int) -> None:
+        """Queue showing deck ``index`` of ``slide_urls`` (preloaded: instant).
+
+        The deck shows the page it was left at; a deck not shown before is
+        still on slide 1.
+        """
+        self._command_queue.put(("deck", index))
+
     def reset_to_first(self) -> None:
-        """Queue a return to the start: slide 1, or black in video mode."""
+        """Queue a return to the start: slide 1 of the shown deck, or black in video mode."""
         self._command_queue.put(("reset", None))
 
     def set_mode(self, mode: str) -> None:
@@ -241,16 +253,17 @@ class SlideController:
                 page = context.new_page()
 
                 host_url = HOST_HTML.as_uri()
-                if self.slide_url:
-                    embed_url = to_embed_url(self.slide_url)
-                    host_url += f"?{urlencode({'src': embed_url})}"
-                    logger.info("Opening audience screen with slides: %s", embed_url)
+                if self.slide_urls:
+                    embed_urls = [to_embed_url(u) for u in self.slide_urls]
+                    host_url += "?" + urlencode([("src", u) for u in embed_urls])
+                    for i, u in enumerate(embed_urls):
+                        logger.info("Opening audience screen with deck %d: %s", i + 1, u)
                 else:
                     logger.info("Opening audience screen without slides (video only)")
                 page.goto(host_url, wait_until="domcontentloaded")
                 self._place_on_projector(context, page)
-                if self.slide_url:
-                    self._wait_slides_loaded(page)
+                if self.slide_urls:
+                    self._wait_slides_loaded(page, startup=True)
                 self._probe_videos(page)
 
                 self._ready_event.set()
@@ -287,6 +300,11 @@ class SlideController:
                                 page.evaluate("() => window.asfResetSlides()")
                                 self._wait_slides_loaded(page)
                                 logger.info("Slides reset to slide 1")
+                        elif op == "deck":
+                            page.evaluate("i => window.asfShowDeck(i)", arg)
+                            if self._mode == "slides":
+                                _focus_slides(page)
+                            logger.info("Showing deck %d", arg + 1)
                         elif op == "mode":
                             self._mode = arg
                             page.evaluate("m => window.asfSetMode(m)", arg)
@@ -353,8 +371,12 @@ class SlideController:
                 logger.error("動画を再生できません: %s (%s)", path, res["error"])
 
     @staticmethod
-    def _wait_slides_loaded(page) -> None:
-        """Block until the embed iframe has loaded, then give it focus."""
+    def _wait_slides_loaded(page, *, startup: bool = False) -> None:
+        """Block until the deck iframe(s) have loaded, then focus the shown one.
+
+        At startup this waits for every deck (they load in parallel);
+        after a reset, only for the reloaded one.
+        """
         # page.evaluate has no timeout of its own; a load that never fires
         # (network down) must not hang the worker forever.
         loaded = page.evaluate(
@@ -362,7 +384,15 @@ class SlideController:
                 new Promise(resolve => setTimeout(() => resolve(false), 20000))])"""
         )
         if not loaded:
-            logger.warning("スライドの読み込みが 20 秒以内に完了しませんでした")
+            if startup:
+                flags = page.evaluate("() => window.asfDeckLoaded")
+                late = [str(i + 1) for i, ok in enumerate(flags) if not ok]
+                logger.warning(
+                    "スライドの読み込みが 20 秒以内に完了しませんでした (デッキ %s)",
+                    ", ".join(late),
+                )
+            else:
+                logger.warning("スライドの読み込みが 20 秒以内に完了しませんでした")
         # The viewer builds its slide DOM after the iframe load event.
         page.wait_for_timeout(1500)
         _focus_slides(page)
@@ -420,7 +450,7 @@ class SlideController:
 
     def __repr__(self) -> str:  # pragma: no cover — debugging aid
         alive = self._thread is not None and self._thread.is_alive()
-        return f"SlideController(url={self.slide_url!r}, running={alive})"
+        return f"SlideController(urls={self.slide_urls!r}, running={alive})"
 
 
 def _video_uri(path: str) -> str:
@@ -431,7 +461,7 @@ def _video_uri(path: str) -> str:
 def _focus_slides(page) -> None:
     # focus(), never click(): a click inside the embed viewer advances the
     # deck by one slide.
-    page.locator("#slide").focus()
+    page.locator("#decks .deck.active").focus()
 
 
 class NullSlideController:
@@ -450,6 +480,9 @@ class NullSlideController:
         return None
 
     def reset_to_first(self) -> None:
+        return None
+
+    def show_deck(self, index: int) -> None:  # noqa: ARG002
         return None
 
     def set_mode(self, mode: str) -> None:  # noqa: ARG002

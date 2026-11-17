@@ -103,3 +103,56 @@ def test_mixing_video_and_slide_triggers_in_a_movement_is_rejected(tmp_path):
 def test_slides_only_config_has_no_video_movements(tmp_path):
     config_path = _write_config(tmp_path, [{"measure": 1}])
     assert not ConfigLoader(str(config_path)).has_video_movements()
+
+
+# ---- movements[].slide_url（楽章ごとのデッキ）
+
+def test_slide_url_on_slides_movement_is_accepted(tmp_path):
+    config_path = _write_config(tmp_path, [{"measure": 1}])
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["movements"][0]["slide_url"] = "https://docs.google.com/presentation/d/ABC/edit"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    loader = ConfigLoader(str(config_path))
+    assert loader.movements[0]["slide_url"].endswith("/ABC/edit")
+
+
+def test_slide_url_on_video_movement_is_rejected(tmp_path):
+    (tmp_path / "a.mp4").write_bytes(b"")
+    config_path = _write_config(tmp_path, [{"measure": 1, "video": "a.mp4"}])
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["movements"][0]["slide_url"] = "https://docs.google.com/presentation/d/ABC/edit"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(ConfigError, match="slide_url"):
+        ConfigLoader(str(config_path))
+
+
+@pytest.mark.parametrize("bad", ["", "   ", 123])
+def test_empty_or_non_string_slide_url_is_rejected(tmp_path, bad):
+    config_path = _write_config(tmp_path, [{"measure": 1}])
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["movements"][0]["slide_url"] = bad
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(ConfigError, match="slide_url"):
+        ConfigLoader(str(config_path))
+
+
+# ---- movements[].input_wav（楽章ごとの音源）
+
+def test_input_wav_is_resolved_relative_to_config(tmp_path):
+    config_path = _write_config(tmp_path, [{"measure": 1}])
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["movements"][0]["input_wav"] = "rec/4.mp3"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    loader = ConfigLoader(str(config_path))
+    # 存在チェックはしない（マイクモードでは不要。ファイル入力の起動時に検証する）
+    assert loader.movements[0]["input_wav"] == str((tmp_path / "rec" / "4.mp3").resolve())
+
+
+@pytest.mark.parametrize("bad", ["", 3])
+def test_empty_or_non_string_input_wav_is_rejected(tmp_path, bad):
+    config_path = _write_config(tmp_path, [{"measure": 1}])
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["movements"][0]["input_wav"] = bad
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(ConfigError, match="input_wav"):
+        ConfigLoader(str(config_path))

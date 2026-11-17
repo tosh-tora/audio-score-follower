@@ -29,12 +29,13 @@ from audio_score_follower.launch_options import (
     INPUT_SOURCE_MIC,
     INPUT_SOURCE_WAV,
     LaunchOptions,
+    MovementRow,
     coerce_device,
     compute_silence_threshold,
     default_config_dir,
     read_launcher_settings,
+    read_movement_rows,
     rematch_device,
-    resolve_input_wav,
     save_launcher_settings,
     validate,
 )
@@ -61,6 +62,9 @@ _DEFAULT_DEVICE_LABEL = "既定のデバイス"
 _ENUM_FAILED_TEXT = "デバイス一覧を取得できませんでした — 番号または名前を直接入力してください"
 _MEASURE_IDLE_TEXT = "未測定 — 本番前にステージが無音の状態で測定してください"
 _HINT_FG = "#777"
+# Movement-table rows guaranteed to fit the 1280x800 budget; a longer
+# config scrolls the table instead of growing the window off-screen.
+_MAX_VISIBLE_MOVEMENTS = 5
 
 # Hover/click explanations for each setting ("?" badge + the label itself).
 # What the setting does and when to touch it — the numbers behind the
@@ -87,17 +91,20 @@ _HELP = {
     ),
     "wav": (
         "録音ファイルを入力にして追随します。別演奏でのカバレッジ確認用。\n"
-        "無音判定は使われません。（CLI: --input-wav）"
+        "音源は楽章ごとに下の楽章表で指定します（N で次の楽章へ移るとその楽章の音源に切り替わる）。\n"
+        "無音判定は使われません。（CLI: --input-wav は全楽章に同じ音源を使う）"
     ),
     "play_audio": (
         "音源ファイルを追随と同時にスピーカーで再生します。"
         "耳で追随のずれを確かめたいときに。（CLI: --play-audio）"
     ),
-    "slide_url": (
-        "ページ送りするGoogleスライドのURL。開始すると左にスライド・"
-        "右に追随パネルを並べた聴衆向け画面が開きます。\n"
-        "空欄ならドライラン（スライドを操作せず追随だけ行う）。\n"
-        "動画を再生する楽章は config のトリガーに video を書きます（この欄は不要）。（CLI: --slide-url）"
+    "movements": (
+        "configの楽章ごとに、ページ送りするGoogleスライドのURLと、"
+        "音源ファイル入力のときに流す録音を指定します。［開始］でconfigの各楽章に保存されます。\n"
+        "全デッキを起動時に読み込んでおくので、N で次の楽章へ移るとスライドも即座に切り替わります。"
+        "同じURLの楽章どうしは1つのデッキを続けて使います。\n"
+        "スライドURLが空欄の楽章はドライラン（スライドを操作しない）。"
+        "動画の楽章はスライドを使いません。（CLI: --slide-url / --input-wav は全楽章共通）"
     ),
     "silence": (
         "マイク音量がこの値(dBFS)以下の間は追随を一時停止します"
@@ -321,6 +328,10 @@ class _DevicePicker:
             self.widget.configure(state="readonly" if enabled else "disabled")
 
 
+def _ellipsize(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 class _LauncherWindow:
     def __init__(self, root: tk.Tk, config_dir: Path) -> None:
         self.root = root
@@ -344,7 +355,7 @@ class _LauncherWindow:
     # ------------------------------------------------------------ widgets
     def _section(self, body: ttk.Frame, title: str) -> ttk.LabelFrame:
         frm = ttk.LabelFrame(body, text=title, padding=(10, 2, 10, 6))
-        frm.pack(fill="x", pady=(0, 6))
+        frm.pack(fill="x", pady=(0, 4))
         frm.columnconfigure(0, minsize=_LABEL_COL_MINSIZE)
         frm.columnconfigure(1, weight=1)
         return frm
@@ -363,13 +374,14 @@ class _LauncherWindow:
     def _spin_cell(
         self, parent: tk.Widget, row: int, var: tk.StringVar, unit: str,
         from_: float, to: float, increment: float,
-    ) -> None:
+    ) -> ttk.Frame:
         cell = ttk.Frame(parent)
         cell.grid(row=row, column=1, sticky="w", pady=1)
         ttk.Spinbox(
             cell, textvariable=var, from_=from_, to=to, increment=increment, width=8,
         ).pack(side="left")
         ttk.Label(cell, text=unit).pack(side="left", padx=(6, 0))
+        return cell
 
     def _build_widgets(self) -> None:
         # Vertical budget: the whole form must fit a 1280x800 screen
@@ -435,25 +447,22 @@ class _LauncherWindow:
             value=INPUT_SOURCE_WAV, command=self._on_source_changed,
         )
         radio_wav.grid(row=2, column=0, sticky="w", **row_pad)
-        self.var_wav = tk.StringVar()
-        self.entry_wav = ttk.Entry(frm_src, textvariable=self.var_wav, width=30)
-        self.entry_wav.grid(row=2, column=1, sticky="we", **row_pad)
-        self.button_wav = ttk.Button(frm_src, text="参照…", command=self._on_browse_wav)
-        self.button_wav.grid(row=2, column=2, sticky="we", padx=(6, 0), **row_pad)
-        self._help(frm_src, 2, "wav", radio_wav)
-
+        # The file itself is per movement (movement table below); this row
+        # only keeps the play-along toggle.
         self.var_play_audio = tk.BooleanVar(value=False)
         self.check_play_audio = ttk.Checkbutton(
-            frm_src, text="同時に再生する", variable=self.var_play_audio,
+            frm_src, text="同時に再生する（音源は下の楽章表で楽章ごとに指定）",
+            variable=self.var_play_audio,
         )
-        self.check_play_audio.grid(row=3, column=1, columnspan=2, sticky="w", **row_pad)
-        self._help(frm_src, 3, "play_audio", self.check_play_audio)
+        self.check_play_audio.grid(row=2, column=1, columnspan=2, sticky="w", **row_pad)
+        self._help(frm_src, 2, "wav", radio_wav)
+        attach_help(_HELP["play_audio"], self.check_play_audio)
 
         self.label_devices = ttk.Label(
             frm_src, text=_ENUM_FAILED_TEXT,
             foreground="#c60", font=self._font_small, wraplength=_WRAP_FULL,
         )
-        self.label_devices.grid(row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        self.label_devices.grid(row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
         if self.pick_mic.devices and self.pick_loopback.devices:
             self.label_devices.grid_remove()
 
@@ -501,27 +510,28 @@ class _LauncherWindow:
         self.label_nc.grid_remove()  # shown once a check has run
 
         # --- slide / behaviour ---------------------------------------------
-        frm_url = self._section(body, "スライド・動作")
-        label_url = ttk.Label(frm_url, text="スライド URL")
-        label_url.grid(row=0, column=0, sticky="w", **row_pad)
-        self.var_slide_url = tk.StringVar()
-        entry_url = ttk.Entry(frm_url, textvariable=self.var_slide_url, width=30)
-        entry_url.grid(row=0, column=1, columnspan=2, sticky="we", **row_pad)
-        self._help(frm_url, 0, "slide_url", label_url)
-        self._hint(frm_url, "空欄 = ドライラン（スライド操作なし）").grid(
-            row=1, column=1, columnspan=2, sticky="w"
-        )
+        frm_url = self._section(body, "楽章（スライド・音源）・動作")
+        # One row per movement of the selected config, rebuilt on every
+        # config selection (_show_movement_rows).
+        self.frm_movements = ttk.Frame(frm_url)
+        self.frm_movements.grid(row=0, column=0, columnspan=3, sticky="we", **row_pad)
+        help_icon(frm_url, _HELP["movements"]).grid(row=0, column=3, sticky="ne", padx=(6, 0))
+        self._movement_rows: list[MovementRow] = []
+        self._movement_vars: list[tuple[tk.StringVar, tk.StringVar]] = []
+        self._movement_wav_widgets: list[tk.Widget] = []
+        self._show_movement_rows([])
 
         label_cooldown = ttk.Label(frm_url, text="トリガ間隔")
         label_cooldown.grid(row=2, column=0, sticky="w", **row_pad)
         self.var_cooldown = tk.StringVar(value="3.0")
-        self._spin_cell(frm_url, 2, self.var_cooldown, "秒", 0.0, 60.0, 0.5)
+        cell = self._spin_cell(frm_url, 2, self.var_cooldown, "秒", 0.0, 60.0, 0.5)
         self._help(frm_url, 2, "cooldown", label_cooldown)
 
-        # Debug toggles share one row (vertical budget); their "?" badges
+        # Debug toggles share the cooldown row (vertical budget: the
+        # movement table above takes up to five rows); their "?" badges
         # sit inline instead of in the help column.
-        frm_dbg = ttk.Frame(frm_url)
-        frm_dbg.grid(row=3, column=0, columnspan=4, sticky="w", **row_pad)
+        frm_dbg = ttk.Frame(cell)
+        frm_dbg.pack(side="left", padx=(32, 0))
         self.var_verbose = tk.BooleanVar(value=False)
         self.var_viz = tk.BooleanVar(value=False)
         for text, var, key in (
@@ -586,6 +596,11 @@ class _LauncherWindow:
         # Hidden while empty so the blank row does not eat vertical space.
         self.label_config_error.configure(text=text)
         if text:
+            # No readable config, no movements: the table must not keep
+            # the previous config's rows (they would be saved into this
+            # one). This also keeps the error row and a full table from
+            # ever sharing the 800px budget.
+            self._show_movement_rows([])
             self.label_config_error.grid()
         else:
             self.label_config_error.grid_remove()
@@ -616,6 +631,7 @@ class _LauncherWindow:
             return
         try:
             saved = read_launcher_settings(path)
+            rows = read_movement_rows(path)
         except (ValueError, OSError) as exc:
             self._set_config_error(f"{path.name}: {exc}")
             self.button_start.configure(state="disabled")
@@ -624,8 +640,7 @@ class _LauncherWindow:
         self.button_start.configure(state="normal")
 
         self.var_source.set(saved["input_source"])
-        self.var_slide_url.set(saved["slide_url"] or "")
-        self.var_wav.set(saved["input_wav"] or "")
+        self._show_movement_rows(rows)
         self.var_play_audio.set(bool(saved["play_audio"]))
         self.var_verbose.set(bool(saved["verbose"]))
         self.var_viz.set(bool(saved["viz"]))
@@ -644,8 +659,8 @@ class _LauncherWindow:
         self.pick_mic.set_enabled(src == INPUT_SOURCE_MIC)
         self.pick_loopback.set_enabled(src == INPUT_SOURCE_LOOPBACK)
         wav_state = "normal" if src == INPUT_SOURCE_WAV else "disabled"
-        self.entry_wav.configure(state=wav_state)
-        self.button_wav.configure(state=wav_state)
+        for widget in self._movement_wav_widgets:
+            widget.configure(state=wav_state)
         self.check_play_audio.configure(state=wav_state)
         # 無音測定 stays enabled in every mode: the threshold is persisted
         # and applies whenever mic mode runs later, so the operator may
@@ -817,7 +832,94 @@ class _LauncherWindow:
                 parent=self.root,
             )
 
-    def _on_browse_wav(self) -> None:
+    # ------------------------------------------------------- movement table
+    def _show_movement_rows(self, rows: list[MovementRow]) -> None:
+        """(Re)build the per-movement table: 楽章 | スライド URL | 音源ファイル."""
+        for child in self.frm_movements.winfo_children():
+            child.destroy()
+        self._movement_rows = list(rows)
+        self._movement_vars = []
+        self._movement_wav_widgets = []
+        if not rows:
+            self._hint(self.frm_movements, "設定ファイルを選ぶと楽章が並びます").pack(anchor="w")
+            return
+
+        if len(rows) <= _MAX_VISIBLE_MOVEMENTS:
+            grid = ttk.Frame(self.frm_movements)
+            grid.pack(fill="x")
+            canvas = None
+        else:
+            # Fixed-height scrolling table: the window must stay on a
+            # 1280x800 screen whatever the movement count.
+            canvas = tk.Canvas(
+                self.frm_movements, highlightthickness=0, borderwidth=0,
+                background=ttk.Style(self.root).lookup("TFrame", "background"),
+            )
+            bar = ttk.Scrollbar(self.frm_movements, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=bar.set)
+            bar.pack(side="right", fill="y")
+            canvas.pack(side="left", fill="x", expand=True)
+            grid = ttk.Frame(canvas)
+            canvas.create_window(0, 0, window=grid, anchor="nw")
+            canvas.bind("<Enter>", lambda _e: canvas.bind_all(
+                "<MouseWheel>", lambda e: canvas.yview_scroll(-int(e.delta / 120), "units")))
+            canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+        grid.columnconfigure(1, weight=1)
+        grid.columnconfigure(2, weight=1)
+        # Small font and thin buttons: five rows must fit the 800px budget
+        # together with the rest of the form (tests/test_gui_layout.py).
+        ttk.Style(self.root).configure("Row.TButton", font=self._font_small, padding=(4, -2))
+        small = {"font": self._font_small}
+
+        for col, text in enumerate(("楽章", "スライド URL（空欄 = ドライラン）", "音源ファイル")):
+            ttk.Label(grid, text=text, foreground=_HINT_FG, font=self._font_small).grid(
+                row=0, column=col, sticky="w", padx=(0, 6))
+        for i, row in enumerate(rows, start=1):
+            # One line per movement: a long score name is cut, with the
+            # full name on hover.
+            label = ttk.Label(grid, text=_ellipsize(row.label, 16), **small)
+            label.grid(row=i, column=0, sticky="w", padx=(0, 6))
+            attach_help(row.label, label)
+            url_var = tk.StringVar(value=row.slide_url or "")
+            wav_var = tk.StringVar(value=row.input_wav or "")
+            entry_url = ttk.Entry(grid, textvariable=url_var, width=34, **small)
+            entry_url.grid(row=i, column=1, sticky="we", padx=(0, 6))
+            if row.is_video:
+                url_var.set("（動画の楽章）")
+                entry_url.configure(state="disabled")
+            entry_wav = ttk.Entry(grid, textvariable=wav_var, width=34, **small)
+            entry_wav.grid(row=i, column=2, sticky="we")
+            button = ttk.Button(
+                grid, text="参照…", style="Row.TButton",
+                command=lambda v=wav_var: self._on_browse_wav(v),
+            )
+            button.grid(row=i, column=3, sticky="nswe", padx=(6, 0))
+            self._movement_vars.append((url_var, wav_var))
+            self._movement_wav_widgets += [entry_wav, button]
+
+        if canvas is not None:
+            grid.update_idletasks()
+            # Height of the header plus the first _MAX_VISIBLE_MOVEMENTS rows.
+            _x, y, _w, h = grid.grid_bbox(0, 0, 3, _MAX_VISIBLE_MOVEMENTS)
+            canvas.configure(
+                width=grid.winfo_reqwidth(), height=y + h,
+                scrollregion=(0, 0, grid.winfo_reqwidth(), grid.winfo_reqheight()),
+            )
+        self._on_source_changed()
+
+    def _collect_movement_rows(self) -> list[MovementRow]:
+        """The table as edited, in config order."""
+        return [
+            MovementRow(
+                label=row.label,
+                slide_url=None if row.is_video else (url_var.get().strip() or None),
+                input_wav=wav_var.get().strip() or None,
+                is_video=row.is_video,
+            )
+            for row, (url_var, wav_var) in zip(self._movement_rows, self._movement_vars)
+        ]
+
+    def _on_browse_wav(self, var: tk.StringVar) -> None:
         initial = str(Path("data") / "reference_audio")
         if not Path(initial).exists():
             initial = "."
@@ -829,7 +931,7 @@ class _LauncherWindow:
             ],
         )
         if chosen:
-            self.var_wav.set(chosen)
+            var.set(chosen)
 
     # ------------------------------------------------------------ start/cancel
     def _build_options(self) -> Optional[LaunchOptions]:
@@ -846,13 +948,14 @@ class _LauncherWindow:
                 "入力エラー", "詳細設定の数値が不正です", parent=self.root
             )
             return None
-        wav_raw = self.var_wav.get().strip()
         src = self.var_source.get()
+        # Slide decks and recordings come from the movement table (saved
+        # into movements[] before the app starts), not from these fields.
         return LaunchOptions(
             config_path=path,
-            slide_url=self.var_slide_url.get().strip() or None,
+            slide_url=None,
             input_source=src,
-            input_wav=resolve_input_wav(Path(wav_raw)) if wav_raw else None,
+            input_wav=None,
             play_audio=bool(self.var_play_audio.get()) and src == INPUT_SOURCE_WAV,
             mic_device=self.pick_mic.value(),
             loopback_device=self.pick_loopback.value(),
@@ -869,7 +972,8 @@ class _LauncherWindow:
         opts = self._build_options()
         if opts is None:
             return
-        errors = validate(opts)
+        rows = self._collect_movement_rows()
+        errors = validate(opts, movement_rows=rows)
         if errors:
             messagebox.showerror("入力エラー", "\n".join(errors), parent=self.root)
             return
@@ -878,7 +982,14 @@ class _LauncherWindow:
                 opts.config_path, opts,
                 mic_device_name=self.pick_mic.selected_name(),
                 loopback_device_name=self.pick_loopback.selected_name(),
+                movement_rows=rows,
             )
+        except ValueError as exc:
+            # The config changed on disk since it was selected: the rows
+            # no longer line up with its movements, and the app reads the
+            # decks / recordings from there — do not start on stale data.
+            messagebox.showerror("保存エラー", str(exc), parent=self.root)
+            return
         except OSError as exc:
             messagebox.showwarning(
                 "保存エラー",
@@ -903,7 +1014,9 @@ class _LauncherWindow:
         self._abort_measure()  # release the measurement mic before navigating
         from audio_score_follower.ui.build_window import run_build_window
 
-        generated = run_build_window(self.root, self.config_dir)
+        generated = run_build_window(
+            self.root, self.config_dir, self._current_config_path()
+        )
         if generated is None:
             return
         self._refresh_config_list()

@@ -27,13 +27,16 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 import queue
 import subprocess
 import sys
 import threading
 import tkinter as tk
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from tkinter import font as tkfont
 from typing import Optional
 
 from audio_score_follower.launch_options import atomic_write_json
@@ -63,6 +66,94 @@ _REFERENCE_FILETYPES = [
 
 
 # ---------------------------------------------------------------- pure logic
+
+# Movement-table rows shown before the table scrolls.
+_MAX_VISIBLE_MOVEMENTS = 5
+
+
+@dataclass
+class MovementBuild:
+    """One movement of the selected config, as the build screen shows it.
+
+    ``output_name`` is the folder name under ``data/built/`` — the only
+    place this screen builds into; None when the movement's built_dir
+    lives elsewhere (it can be shown but not loaded into the form).
+    ``reference`` / ``built_score`` come from the existing build's
+    build_meta.json: None for builds made before they were recorded.
+    """
+
+    movement_id: object
+    score: Optional[Path]
+    built_dir: Path
+    output_name: Optional[str]
+    built: bool
+    reference: Optional[Path] = None
+    built_score: Optional[Path] = None
+
+
+def read_build_meta_inputs(built_dir: Path) -> tuple[Optional[Path], Optional[Path]]:
+    """(MusicXML, reference recording) an existing build was made from.
+
+    Both None when the build predates their recording in build_meta.json
+    or the file is missing / unreadable.
+    """
+    try:
+        meta = json.loads((Path(built_dir) / "build_meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, None
+    score = meta.get("score_path")
+    reference = meta.get("reference_path")
+    return (Path(score) if score else None), (Path(reference) if reference else None)
+
+
+def config_movement_builds(config_path: Path, built_root: Path) -> list[MovementBuild]:
+    """List the builds the movements of ``config_path`` point at.
+
+    Raw JSON like the launcher (no ConfigLoader: a config whose builds are
+    missing must still be listable — that is when you open this screen).
+    Paths are resolved against the config file, as ConfigLoader does.
+    Raises ValueError for unreadable JSON.
+    """
+    config_path = Path(config_path)
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"JSON 構文エラー: {exc.msg} (行 {exc.lineno})") from exc
+    base = config_path.resolve().parent
+    built_root = Path(built_root).resolve()
+    rows = []
+    movements = data.get("movements") if isinstance(data.get("movements"), list) else []
+    for i, m in enumerate(movements):
+        if not isinstance(m, dict) or not m.get("built_dir"):
+            continue
+        built_dir = (base / str(m["built_dir"])).resolve()
+        score = (base / str(m["xml_file"])).resolve() if m.get("xml_file") else None
+        built_score, reference = read_build_meta_inputs(built_dir)
+        rows.append(MovementBuild(
+            movement_id=m.get("id", i + 1),
+            score=score,
+            built_dir=built_dir,
+            output_name=built_dir.name if built_dir.parent == built_root else None,
+            built=(built_dir / "build_meta.json").is_file(),
+            reference=reference,
+            built_score=built_score,
+        ))
+    return rows
+
+
+def overwrite_message(output_dir: Path) -> str:
+    """Confirmation text for building into an existing output folder."""
+    built_score, reference = read_build_meta_inputs(output_dir)
+    lines = [f"{output_dir.name} は既にあります（{output_dir}）。"]
+    if built_score or reference:
+        lines.append("前回のビルドの入力:")
+        lines.append(f"  楽譜: {built_score.name if built_score else '不明'}")
+        lines.append(f"  参照録音: {reference.name if reference else '不明'}")
+    else:
+        lines.append("前回のビルドの入力は記録されていません（記録はこの機能の追加後のビルドから）。")
+    lines.append("")
+    lines.append("上書きしてビルドしますか？")
+    return "\n".join(lines)
 
 def build_command(
     score: Path,
@@ -193,9 +284,14 @@ class BuildWindow:
     launcher uses it to pre-select the fresh config on return.
     """
 
-    def __init__(self, root: tk.Tk, config_dir: Path) -> None:
+    def __init__(
+        self, root: tk.Tk, config_dir: Path, config_path: Optional[Path] = None
+    ) -> None:
         self.root = root
         self.config_dir = Path(config_dir).resolve()
+        # The config selected in the launcher: its movements are listed so
+        # a rebuild is made knowing what it overwrites.
+        self.config_path = Path(config_path) if config_path else None
         # config/ and data/ are siblings at the project root (existing
         # convention: built_dir is "../data/built/..." relative to config/).
         self.project_root = self.config_dir.parent
@@ -217,7 +313,10 @@ class BuildWindow:
         self.top.geometry(_WINDOW_GEOMETRY)
         self._font, self._font_small = apply_base_style(self.top, font_source=root)
 
+        self._movement_builds: list[MovementBuild] = []
         self._build_widgets()
+        self._load_movement_table()
+        self._on_gen_config_toggled()
         self.top.protocol("WM_DELETE_WINDOW", self._on_back)
 
     # -------------------------------------------------------------- widgets
@@ -225,6 +324,47 @@ class BuildWindow:
         pad = {"padx": 10, "pady": 4}
         body = ttk.Frame(self.top, padding=10)
         body.pack(fill="both", expand=True)
+
+        # --- movements of the selected config -----------------------------
+        title = (
+            f"選択中の config: {self.config_path.name}" if self.config_path
+            else "選択中の config: なし"
+        )
+        frm_mv = ttk.LabelFrame(body, text=title)
+        frm_mv.pack(fill="x", **pad)
+        columns = ("movement", "score", "reference", "output")
+        # Treeview rows do not grow with the font: without an explicit
+        # rowheight the 12pt text overlaps the next row.
+        linespace = tkfont.Font(root=self.top, font=self._font).metrics("linespace")
+        ttk.Style(self.top).configure("Movements.Treeview", rowheight=linespace + 6)
+        self.tree_movements = ttk.Treeview(
+            frm_mv, columns=columns, show="headings", selectmode="browse",
+            height=1, style="Movements.Treeview",
+        )
+        for col, text, width in (
+            ("movement", "楽章", 50), ("score", "楽譜", 300),
+            ("reference", "参照録音（前回のビルド）", 310), ("output", "出力名", 170),
+        ):
+            self.tree_movements.heading(col, text=text, anchor="w")
+            self.tree_movements.column(col, width=width, anchor="w", stretch=col != "movement")
+        mv_scroll = ttk.Scrollbar(frm_mv, orient="vertical", command=self.tree_movements.yview)
+        self.tree_movements.configure(yscrollcommand=mv_scroll.set)
+        self.tree_movements.grid(row=0, column=0, sticky="we", padx=(8, 0), pady=(4, 0))
+        mv_scroll.grid(row=0, column=1, sticky="ns", pady=(4, 0))
+        frm_mv.columnconfigure(0, weight=1)
+        self.tree_movements.bind("<Double-1>", lambda _e: self._on_load_movement())
+        frm_mv_btn = ttk.Frame(frm_mv)
+        frm_mv_btn.grid(row=1, column=0, columnspan=2, sticky="we", padx=8, pady=4)
+        self.button_load_movement = ttk.Button(
+            frm_mv_btn, text="選択した楽章をフォームに読み込む",
+            command=self._on_load_movement,
+        )
+        self.button_load_movement.pack(side="left")
+        self.label_movements = ttk.Label(
+            frm_mv_btn, text="", foreground="#888", font=self._font_small,
+            wraplength=600, justify="left",
+        )
+        self.label_movements.pack(side="left", padx=(12, 0))
 
         # --- inputs ------------------------------------------------------
         frm_in = ttk.LabelFrame(body, text="入力")
@@ -299,7 +439,10 @@ class BuildWindow:
         frm_cfg = ttk.LabelFrame(body, text="config.json の生成")
         frm_cfg.pack(fill="x", **pad)
         frm_cfg.columnconfigure(1, weight=1)
-        self.var_gen_config = tk.BooleanVar(value=True)
+        # Off by default: rebuilding a movement of an existing config is the
+        # common case, and generating would replace that config with a
+        # one-movement one. Tick it only when starting a new piece.
+        self.var_gen_config = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             frm_cfg, text="ビルド成功後に対応する config を生成する",
             variable=self.var_gen_config, command=self._on_gen_config_toggled,
@@ -347,6 +490,71 @@ class BuildWindow:
         ttk.Entry(parent, textvariable=var, width=10).grid(
             row=row, column=col + 1, sticky="w", padx=(0, 8), pady=4
         )
+
+    # ------------------------------------------------------- movement table
+    def _load_movement_table(self) -> None:
+        tree = self.tree_movements
+        tree.delete(*tree.get_children())
+        self._movement_builds = []
+        if self.config_path is None:
+            self._set_movement_note("ランチャーで config を選ぶと、その楽章のビルドがここに並びます")
+            return
+        try:
+            self._movement_builds = config_movement_builds(
+                self.config_path, self.data_dir / "built"
+            )
+        except (ValueError, OSError) as exc:
+            self._set_movement_note(f"{self.config_path.name} を読めません: {exc}")
+            return
+        for i, mb in enumerate(self._movement_builds):
+            reference = mb.reference.name if mb.reference else (
+                "不明（記録なし）" if mb.built else "—")
+            output = mb.output_name or str(mb.built_dir)
+            if not mb.built:
+                output += "（未ビルド）"
+            tree.insert("", "end", iid=str(i), values=(
+                mb.movement_id, mb.score.name if mb.score else "（自動検出）",
+                reference, output,
+            ))
+        tree.configure(height=max(1, min(len(self._movement_builds), _MAX_VISIBLE_MOVEMENTS)))
+        if self._movement_builds:
+            tree.selection_set("0")
+        self._set_movement_note(
+            "読み込むと、その楽章のビルドを上書きする内容がフォームに入ります（ビルド実行時に上書き確認あり）"
+        )
+
+    def _set_movement_note(self, text: str) -> None:
+        self.label_movements.configure(text=text)
+        state = "normal" if self._movement_builds else "disabled"
+        self.button_load_movement.configure(state=state)
+
+    def _on_load_movement(self) -> None:
+        selected = self.tree_movements.selection()
+        if not selected:
+            return
+        mb = self._movement_builds[int(selected[0])]
+        if mb.output_name is None:
+            messagebox.showwarning(
+                "読み込めません",
+                f"この楽章のビルド先は {self.data_dir / 'built'} の外にあります:\n{mb.built_dir}\n"
+                "この画面は data/built/ の下にしかビルドできません。",
+                parent=self.top,
+            )
+            return
+        self.var_score.set(str(mb.score) if mb.score else "")
+        self.var_reference.set(str(mb.reference) if mb.reference else "")
+        self.var_output.set(mb.output_name)
+        # The config already points at this build: generating one would
+        # replace it with a single-movement config.
+        self.var_gen_config.set(False)
+        self._on_gen_config_toggled()
+        if mb.reference is None:
+            messagebox.showinfo(
+                "参照録音を選んでください",
+                "この楽章の前回のビルドには参照録音が記録されていません。\n"
+                "参照録音を選んでからビルドしてください（次回からは記録されます）。",
+                parent=self.top,
+            )
 
     # ----------------------------------------------------------- callbacks
     def _browse_score(self) -> None:
@@ -430,6 +638,11 @@ class BuildWindow:
             return
         cmd = self._collect_command()
         if cmd is None:
+            return
+        output_dir = self._resolved_output()
+        if output_dir.exists() and any(output_dir.iterdir()) and not messagebox.askyesno(
+            "上書き確認", overwrite_message(output_dir), parent=self.top,
+        ):
             return
         if self.var_gen_config.get():
             name = self.var_config_name.get().strip()
@@ -606,7 +819,9 @@ class BuildWindow:
         self.top.destroy()
 
 
-def run_build_window(root: tk.Tk, config_dir: Path) -> Optional[Path]:
+def run_build_window(
+    root: tk.Tk, config_dir: Path, config_path: Optional[Path] = None
+) -> Optional[Path]:
     """Open the build screen modally over ``root``; return generated config.
 
     Hides the launcher root while the build screen is up (screen-to-screen
@@ -614,7 +829,7 @@ def run_build_window(root: tk.Tk, config_dir: Path) -> Optional[Path]:
     local event loop until the Toplevel is destroyed. Returns the Path of
     a config.json generated during the session, or None.
     """
-    window = BuildWindow(root, config_dir)
+    window = BuildWindow(root, config_dir, config_path)
     root.withdraw()
     try:
         root.wait_window(window.top)

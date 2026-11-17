@@ -31,6 +31,7 @@ CLI フラグの一覧は README.md が正本。実測値は [calibration.md](ca
 - 定テンポ合成は捨てた: 幻想1 の Largo ♩≈50 / Allegro ♩≈250 のような大きなテンポ差を消すと、MrMsDTW が対角線に退化して Largo を数倍速く小節換算する（→ [experiments.md](experiments.md#定テンポ合成-単一-bpm)、実測 → [calibration.md](calibration.md#4-合成テンポの自動推定)）
 - 楽譜指示の BPM そのまま（倍率なし）でもダメ: 実演奏との 20〜30% の全体テンポ差で MrMsDTW のスキップが大量発生し warp 検証に落ちる。倍率で総尺を合わせるのはこのため
 - `--score-bpm` 明示指定 → 従来どおり定テンポ合成（テンポマップなし）。`--score-wav` 指定時は `--score-bpm` 必須（事前合成 WAV のテンポは録音から逆推定できない）
+- `build_meta.json` の `score_path` / `reference_path` はビルドの入力（MusicXML と参照録音の絶対パス）。config は出力先（`built_dir`）しか持たないので、ビルド画面が「再ビルドで何を上書きするか」を示すにはビルド側に入力を残すしかない。これを記録する前のビルドには無い（画面は「不明」と表示）
 - `build_meta.json` の `score_bpm` は平均テンポ（総ビート × 60 ÷ 参照 duration）、`synth_tempo_mode` は `score_scaled` / `constant`
 - 平均テンポが sanity range 外、または参照 duration が短すぎる場合は ERROR 停止し明示指定を促す
 - テンポマップのない旧ビルドは `score_bpm` による定テンポ換算でそのまま動く（再ビルド推奨）

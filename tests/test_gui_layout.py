@@ -255,8 +255,28 @@ def _build_launcher(root, tmp_path, monkeypatch):
     return launcher._LauncherWindow(root, tmp_path)
 
 
+def _long_movement_rows(n):
+    from audio_score_follower.launch_options import MovementRow
+
+    long_path = "C:/" + "very_long_directory_name/" * 6 + "recording.mp3"
+    return [
+        MovementRow(
+            label=f"{i}: 幻想交響曲{i}_リピート削除_とても長い楽譜ファイル名",
+            slide_url="https://docs.google.com/presentation/d/" + "x" * 44 + "/edit?usp=sharing",
+            input_wav=long_path,
+        )
+        for i in range(1, n + 1)
+    ]
+
+
 def test_launcher_fits_the_target_screen_in_the_worst_case(root, tmp_path, monkeypatch):
     win = _build_launcher(root, tmp_path, monkeypatch)
+    # 楽章表: 画面に収める上限（_MAX_VISIBLE_MOVEMENTS = 5）を長い値で埋める。
+    # config エラー行と楽章表は同時に出ない（エラー時は表を空にする）ので、
+    # 表を出すときはエラー行を消す。
+    win._show_movement_rows(_long_movement_rows(5))
+    win.label_config_error.configure(text="")
+    win.label_config_error.grid_remove()
     # 実際に出る文言のうち最長のもの（mic_effects_probe.headline_ja /
     # _finish_measure）を長いデバイス名で出す。
     win.label_nc.configure(text=(
@@ -358,3 +378,37 @@ def test_rescan_aborts_running_measurement(root, tmp_path, monkeypatch):
     win._measure_monitor = type("M", (), {"stop": lambda self: stopped.append(1)})()
     _rescan_with(win, monkeypatch, [(0, "Mic", "0: Mic [MME]")])
     assert stopped == [1] and win._measure_monitor is None
+
+
+def test_movement_table_scrolls_beyond_five_movements(root, tmp_path, monkeypatch):
+    # 6 楽章以上は表をスクロールさせ、ウィンドウの高さは 5 楽章のときと同じに保つ
+    win = _build_launcher(root, tmp_path, monkeypatch)
+    win._show_movement_rows(_long_movement_rows(5))
+    root.update_idletasks()
+    five = root.winfo_reqheight()
+    win._show_movement_rows(_long_movement_rows(9))
+    root.update_idletasks()
+    assert abs(root.winfo_reqheight() - five) <= 4
+    assert any(isinstance(w, tk.Canvas) for w in win.frm_movements.winfo_children())
+    assert len(win._collect_movement_rows()) == 9
+
+
+def test_movement_wav_fields_follow_the_input_source(root, tmp_path, monkeypatch):
+    from audio_score_follower.launch_options import INPUT_SOURCE_MIC, INPUT_SOURCE_WAV
+
+    win = _build_launcher(root, tmp_path, monkeypatch)
+    win._show_movement_rows(_long_movement_rows(2))
+    win.var_source.set(INPUT_SOURCE_MIC)
+    win._on_source_changed()
+    assert all(str(w.cget("state")) == "disabled" for w in win._movement_wav_widgets)
+    win.var_source.set(INPUT_SOURCE_WAV)
+    win._on_source_changed()
+    assert all(str(w.cget("state")) == "normal" for w in win._movement_wav_widgets)
+
+
+def test_config_error_clears_the_movement_table(root, tmp_path, monkeypatch):
+    # 読めない config に切り替えたら前の config の楽章を残さない（残すと別 config に保存される）
+    win = _build_launcher(root, tmp_path, monkeypatch)
+    win._show_movement_rows(_long_movement_rows(3))
+    win._set_config_error("broken.json: JSON 構文エラー")
+    assert win._collect_movement_rows() == []
