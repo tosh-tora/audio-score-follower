@@ -230,3 +230,41 @@ def test_return_to_launcher_allowed_without_a_loaded_movement():
     closed = _closing_recorder(app)
     assert app.return_to_launcher() is True
     assert closed == [True]
+
+
+# ---- Console window × (Issue #64) ------------------------------------------
+
+def _close_with_answer(app, monkeypatch, answer: bool):
+    asked = []
+
+    def fake_ask(*_a, **_kw):
+        asked.append(True)
+        return answer
+
+    monkeypatch.setattr("audio_score_follower.main.messagebox.askyesno", fake_ask)
+    app.root = None
+    closed = _closing_recorder(app)
+    app._on_close_requested()
+    return asked, closed
+
+
+def test_close_while_performing_asks_and_cancel_keeps_running(monkeypatch):
+    app = _make_app()
+    asked, closed = _close_with_answer(app, monkeypatch, False)
+    assert asked == [True]
+    assert closed == []
+
+
+def test_close_while_performing_confirmed_closes(monkeypatch):
+    app = _make_app()
+    asked, closed = _close_with_answer(app, monkeypatch, True)
+    assert asked == [True]
+    assert closed == [True]
+
+
+def test_close_when_not_performing_closes_without_asking(monkeypatch):
+    app = _make_app()
+    app.end_performance()
+    asked, closed = _close_with_answer(app, monkeypatch, False)
+    assert asked == []
+    assert closed == [True]

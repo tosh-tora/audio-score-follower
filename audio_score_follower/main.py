@@ -45,6 +45,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from tkinter import messagebox
 from pathlib import Path
 
 # Windows cp932/cp1252 stdout cannot encode em-dashes or Japanese. Force
@@ -213,7 +214,10 @@ class AudioScoreFollowerApp:
         except ValueError as exc:
             raise ConfigError(str(exc)) from exc
         if decks or videos:
-            self.slide_controller = SlideController(slide_urls=decks, videos=videos)
+            self.slide_controller = SlideController(
+                slide_urls=decks, videos=videos,
+                on_reopened=self._on_slide_screen_reopened,
+            )
         else:
             logger.warning(
                 "--slide-url 未指定: ドライランモードで起動します。"
@@ -369,7 +373,7 @@ class AudioScoreFollowerApp:
             "Ready. N=next movement, R=reload, L=force lock-in, "
             "E=end performance, →/Space=manual next slide, ←=manual back."
         )
-        self.root.protocol("WM_DELETE_WINDOW", self._on_gui_closing)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close_requested)
         try:
             self.root.mainloop()
         except KeyboardInterrupt:
@@ -398,6 +402,38 @@ class AudioScoreFollowerApp:
             self.state.set_mic_effects_warning(report.headline_ja())
         else:
             logger.info("Mic effects check: %s", report.headline_ja())
+
+    def _on_close_requested(self) -> None:
+        """Console window × (Issue #64): confirm first while performing.
+
+        Closing tears down the follower and the audience screen with it,
+        and nothing brings them back mid-concert, so a stray click must not
+        be enough. Outside a performance (before 「▶ 演奏開始」, after
+        「■ 演奏終了」) it closes at once — rehearsal shutdowns stay quick.
+        """
+        if self.is_performing() and not messagebox.askyesno(
+            "演奏中です",
+            "演奏中です。閉じると追随が止まり、スライド画面も閉じます。\n"
+            "本当に終了しますか?",
+            icon="warning",
+            default="no",
+            parent=self.root,
+        ):
+            logger.info("Close request cancelled by operator (performing)")
+            return
+        self._on_gui_closing()
+
+    def _on_slide_screen_reopened(self) -> None:
+        """Audience window was closed and reopened (slide-controller thread).
+
+        Shown on the existing slide warning banner rather than a new row
+        (the console's 1200x800 budget). The time tells the operator
+        whether it is news or an old event.
+        """
+        self.state.set_slide_controller_warning(
+            "スライド画面が閉じられたため開き直しました"
+            f"（{time.strftime('%H:%M:%S')}）。表示位置を確認してください"
+        )
 
     def _on_gui_closing(self) -> None:
         logger.info("GUI closing")
