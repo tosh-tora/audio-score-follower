@@ -63,6 +63,7 @@ from audio_score_follower.core.mic_effects_probe import probe_capture_effects
 from audio_score_follower.core.movement_loader import (
     MovementLoadError,
     load_movement,
+    prewarm_scores,
 )
 from audio_score_follower.core.oltw_follower import OnlineDTWFollower
 from audio_score_follower.core.result_handler import (
@@ -346,6 +347,13 @@ class AudioScoreFollowerApp:
 
         logger.info("Loading first movement …")
         self._load_current_movement()
+        # Parse the other movements' scores now, while the first one waits
+        # for its start press, so N / P switch without freezing the console
+        # (see movement_loader.get_score_mapper).
+        threading.Thread(
+            target=prewarm_scores, args=(self.config,),
+            daemon=True, name="score-prewarm",
+        ).start()
 
         self.trigger_engine.start()
         self.root.after(_PANEL_POLL_MS, self._push_audience_panel)
@@ -445,6 +453,28 @@ class AudioScoreFollowerApp:
             # and the next N press skips the following one.
             logger.warning("Next-movement load failed; reverting to movement %d", prev_idx + 1)
             self.config.current_movement_idx = prev_idx
+
+    def _load_prev_movement(self) -> None:
+        """Go back one movement (P key) — e.g. N was pressed by mistake.
+
+        Loading resets the fired-trigger history, so the deck goes back to
+        slide 1 as with R: a revisited deck otherwise resumes on the page it
+        was left at, and re-firing the triggers from measure 1 would push it
+        past its end. (A deck shared with an earlier movement has no record
+        of where this movement's slides begin; slide 1 is the same limitation
+        R already has — the operator corrects with ←/→.)
+        """
+        old_idx = self.config.current_movement_idx
+        if not self.config.prev_movement():
+            logger.warning("Already at first movement")
+            return
+        movement = self.config.get_current_movement()
+        if not (movement and self._load_movement(movement)):
+            # Same index rollback as _load_next_movement.
+            logger.warning("Prev-movement load failed; reverting to movement %d", old_idx + 1)
+            self.config.current_movement_idx = old_idx
+            return
+        self.slide_controller.reset_to_first()
 
     def _stop_worker(self) -> None:
         """Stop and drop the current OLTW worker (if any)."""
@@ -810,6 +840,9 @@ class AudioScoreFollowerApp:
         def _on_n(_e: tk.Event) -> None:
             self._load_next_movement()
 
+        def _on_p(_e: tk.Event) -> None:
+            self._load_prev_movement()
+
         def _on_r(_e: tk.Event) -> None:
             # Reload resets the fired-trigger history, so the deck goes back
             # to slide 1 too (the measure-1 trigger then advances it again).
@@ -844,6 +877,8 @@ class AudioScoreFollowerApp:
         # exist in the follow GUI, so intercepting plain keys is safe here.)
         self.root.bind_all("<KeyPress-n>", _on_n)
         self.root.bind_all("<KeyPress-N>", _on_n)
+        self.root.bind_all("<KeyPress-p>", _on_p)
+        self.root.bind_all("<KeyPress-P>", _on_p)
         self.root.bind_all("<KeyPress-r>", _on_r)
         self.root.bind_all("<KeyPress-R>", _on_r)
         self.root.bind_all("<KeyPress-l>", _on_l)
@@ -855,7 +890,7 @@ class AudioScoreFollowerApp:
         self.root.bind_all("<KeyPress-Left>", _on_prev)
         self.root.bind_all("<KeyPress-Up>", _on_thr_up)
         self.root.bind_all("<KeyPress-Down>", _on_thr_down)
-        logger.info("Keys bound (app-wide): N R L E → ← Space ↑ ↓")
+        logger.info("Keys bound (app-wide): N P R L E → ← Space ↑ ↓")
 
 
 def main() -> int:

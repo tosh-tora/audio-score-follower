@@ -237,6 +237,13 @@ class ConfigLoader:
         logger.warning("Already at last movement")
         return False
 
+    def prev_movement(self) -> bool:
+        if self.current_movement_idx > 0:
+            self.current_movement_idx -= 1
+            return True
+        logger.warning("Already at first movement")
+        return False
+
     def get_cooldown_seconds(self) -> float:
         return self.settings.get("cooldown_seconds", 3.0)
 
