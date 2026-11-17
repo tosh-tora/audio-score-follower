@@ -36,6 +36,19 @@ plays a scene from the top and leaves it on its last frame. Scene videos
 are muted, and each is probed at startup so a file this browser cannot
 decode is reported before the concert, not at its trigger.
 
+Recovery when the window is closed (Issue #64)
+-----------------------------------------------
+Nothing stops the audience window being closed (× / Alt+F4 on the
+projector PC; Chromium's beforeunload prompt needs a prior user gesture
+and Playwright auto-dismisses dialogs, so it cannot be relied on). The
+worker therefore watches for a closed page or a dead browser and opens
+the screen again, then restores what the audience saw: the shown deck,
+each deck's position, the slides/video mode, the held video frame and the
+tracking panel. A deck's position is restored by re-sending every key
+pressed on it since its last reset rather than jumping to a slide number:
+the embed viewer counts build steps (animations) as presses too, so only
+the same key sequence lands on the same build state.
+
 Action mapping
 --------------
 The existing config.json uses short action names ("right", "left", ...).
@@ -49,8 +62,9 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 from urllib.parse import urlencode
 
 from audio_score_follower.ui.audience_panel import (
@@ -61,6 +75,12 @@ from audio_score_follower.ui.audience_panel import (
 
 logger = logging.getLogger(__name__)
 
+
+# Wait before retrying a failed reopen of the audience window.
+_REOPEN_RETRY_SEC = 2.0
+# Gap between replayed key presses when restoring a deck's position: a
+# press sent while the viewer still animates the previous one can be lost.
+_REPLAY_GAP_MS = 150
 
 # config.json `action` strings → Playwright key identifiers.
 # https://playwright.dev/python/docs/api/class-keyboard#keyboard-press
@@ -95,6 +115,7 @@ class SlideController:
         videos: Sequence[str] = (),
         headless: bool = False,
         viewport: Optional[dict] = None,
+        on_reopened: Optional[Callable[[], None]] = None,
     ) -> None:
         """
         Args:
@@ -108,6 +129,9 @@ class SlideController:
                 True only for automated tests.
             viewport: Optional viewport dict (``{"width": ..., "height": ...}``).
                 Default uses the OS window size.
+            on_reopened: Called (from the worker thread) after a closed
+                audience window was opened again, so the operator console
+                can say so.
         """
         self.slide_urls = list(slide_urls)
         self.videos = list(videos)
@@ -118,6 +142,16 @@ class SlideController:
         # Which layer the audience sees; only touched by the worker thread
         # (commands apply in queue order, so reset follows the last mode).
         self._mode = "slides"
+        self.on_reopened = on_reopened
+        # What the audience should be seeing, recorded as each command is
+        # applied, so a reopened window can be put back (see module doc).
+        # Worker-thread only, like _mode.
+        self._deck = 0
+        # Keys sent to each deck since its last reset (its position).
+        self._presses: dict[int, list[str]] = {}
+        # Video whose last frame is (or will end up) on screen; None = black.
+        self._video: Optional[str] = None
+        self._last_view: Optional[dict] = None
 
         self._command_queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
         self._thread: Optional[threading.Thread] = None
@@ -237,39 +271,28 @@ class SlideController:
 
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch(
-                    headless=self.headless,
-                    args=[
-                        "--start-maximized",
-                        # Reduce automation banner / detection so Google Slides
-                        # behaves like a normal user session.
-                        "--disable-blink-features=AutomationControlled",
-                    ],
-                )
-                context_kwargs = {"no_viewport": self.viewport is None}
-                if self.viewport is not None:
-                    context_kwargs = {"viewport": self.viewport}
-                context = browser.new_context(**context_kwargs)
-                page = context.new_page()
-
-                host_url = HOST_HTML.as_uri()
-                if self.slide_urls:
-                    embed_urls = [to_embed_url(u) for u in self.slide_urls]
-                    host_url += "?" + urlencode([("src", u) for u in embed_urls])
-                    for i, u in enumerate(embed_urls):
-                        logger.info("Opening audience screen with deck %d: %s", i + 1, u)
-                else:
-                    logger.info("Opening audience screen without slides (video only)")
-                page.goto(host_url, wait_until="domcontentloaded")
-                self._place_on_projector(context, page)
-                if self.slide_urls:
-                    self._wait_slides_loaded(page, startup=True)
+                browser, context, page = self._open_screen(p, None)
                 self._probe_videos(page)
 
                 self._ready_event.set()
                 logger.info("SlideController ready.")
 
+                next_reopen_try = 0.0
                 while not self._stop_event.is_set():
+                    if not _screen_alive(browser, page):
+                        # Queued commands wait until the screen is back and
+                        # apply after the restore, in order.
+                        now = time.monotonic()
+                        if now < next_reopen_try:
+                            self._stop_event.wait(0.2)
+                            continue
+                        try:
+                            browser, context, page = self._reopen(p, browser, context)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.error("スライド画面を開き直せませんでした: %s", exc, exc_info=True)
+                            next_reopen_try = now + _REOPEN_RETRY_SEC
+                        continue
+
                     try:
                         cmd = self._command_queue.get(timeout=0.2)
                     except queue.Empty:
@@ -281,69 +304,7 @@ class SlideController:
 
                     op, arg = cmd
                     try:
-                        if op == "press":
-                            # Re-focus every time: key events only reach the
-                            # deck while its iframe holds focus.
-                            _focus_slides(page)
-                            page.keyboard.press(arg)
-                            logger.info("Sent key press: %s", arg)
-                        elif op == "panel":
-                            with self._view_lock:
-                                view, self._pending_view = self._pending_view, None
-                            if view is not None:
-                                page.evaluate("v => window.asfUpdate(v)", view)
-                        elif op == "reset":
-                            if self._mode == "video":
-                                page.evaluate("() => window.asfBlack()")
-                                logger.info("Video reset to black")
-                            else:
-                                page.evaluate("() => window.asfResetSlides()")
-                                self._wait_slides_loaded(page)
-                                logger.info("Slides reset to slide 1")
-                        elif op == "deck":
-                            page.evaluate("i => window.asfShowDeck(i)", arg)
-                            if self._mode == "slides":
-                                _focus_slides(page)
-                            logger.info("Showing deck %d", arg + 1)
-                        elif op == "mode":
-                            self._mode = arg
-                            page.evaluate("m => window.asfSetMode(m)", arg)
-                            if arg == "video":
-                                page.evaluate("() => window.asfBlack()")
-                            else:
-                                _focus_slides(page)
-                            logger.info("Audience screen mode: %s", arg)
-                        elif op == "play":
-                            path, next_path = arg
-                            res = page.evaluate(
-                                "([u, n]) => window.asfPlay(u, n)",
-                                [_video_uri(path), _video_uri(next_path) if next_path else None],
-                            )
-                            if res["error"]:
-                                logger.error("動画を再生できません: %s (%s)", path, res["error"])
-                            else:
-                                logger.info("Playing video: %s", Path(path).name)
-                            if res["cut"]:
-                                # The scene was longer than this performance's
-                                # gap between triggers: shorten the file.
-                                logger.warning(
-                                    "前のシーンが終わる前に次のシーンへ切り替えました "
-                                    "(→ %s)。前のシーン動画を短くすることを検討してください",
-                                    Path(path).name,
-                                )
-                        elif op == "hold":
-                            if arg is None:
-                                page.evaluate("() => window.asfBlack()")
-                                logger.info("Video held on black")
-                            else:
-                                res = page.evaluate("u => window.asfHoldEnd(u)", _video_uri(arg))
-                                if res["error"]:
-                                    logger.error("動画の最終フレームを表示できません: %s (%s)",
-                                                 arg, res["error"])
-                                else:
-                                    logger.info("Holding last frame of: %s", Path(arg).name)
-                        else:
-                            logger.warning("Unknown slide controller command: %s", op)
+                        self._apply(page, op, arg)
                     except Exception as exc:  # noqa: BLE001
                         logger.error("Slide command %s %s failed: %s", op, arg, exc, exc_info=True)
 
@@ -359,6 +320,157 @@ class SlideController:
         finally:
             self._ready_event.set()  # unblock waiters even on failure
             logger.info("SlideController worker exiting")
+
+    def _open_screen(self, p, browser):
+        """Open the audience window (launching Chromium if there is none)
+        and load every deck. Returns ``(browser, context, page)``."""
+        if browser is None or not browser.is_connected():
+            browser = p.chromium.launch(
+                headless=self.headless,
+                args=[
+                    "--start-maximized",
+                    # Reduce automation banner / detection so Google Slides
+                    # behaves like a normal user session.
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
+        context_kwargs = {"no_viewport": self.viewport is None}
+        if self.viewport is not None:
+            context_kwargs = {"viewport": self.viewport}
+        context = browser.new_context(**context_kwargs)
+        page = context.new_page()
+
+        host_url = HOST_HTML.as_uri()
+        if self.slide_urls:
+            embed_urls = [to_embed_url(u) for u in self.slide_urls]
+            host_url += "?" + urlencode([("src", u) for u in embed_urls])
+            for i, u in enumerate(embed_urls):
+                logger.info("Opening audience screen with deck %d: %s", i + 1, u)
+        else:
+            logger.info("Opening audience screen without slides (video only)")
+        page.goto(host_url, wait_until="domcontentloaded")
+        self._place_on_projector(context, page)
+        if self.slide_urls:
+            self._wait_slides_loaded(page, startup=True)
+        return browser, context, page
+
+    def _reopen(self, p, browser, context):
+        """The audience window was closed: open it again and restore it."""
+        logger.warning("スライド画面が閉じられました。開き直します")
+        try:
+            context.close()  # whatever is left of the old window
+        except Exception:  # noqa: BLE001
+            pass
+        browser, context, page = self._open_screen(p, browser)
+        self._restore(page)
+        logger.warning("スライド画面を開き直し、表示を復元しました")
+        if self.on_reopened is not None:
+            try:
+                self.on_reopened()
+            except Exception as exc:  # noqa: BLE001
+                logger.error("on_reopened callback raised: %s", exc, exc_info=True)
+        return browser, context, page
+
+    def _restore(self, page) -> None:
+        """Put a freshly opened screen back to the recorded state."""
+        for deck, keys in self._presses.items():
+            if not keys:
+                continue
+            page.evaluate("i => window.asfShowDeck(i)", deck)
+            _focus_slides(page)
+            for key in keys:
+                page.keyboard.press(key)
+                page.wait_for_timeout(_REPLAY_GAP_MS)
+            logger.info("Restored deck %d (%d key presses)", deck + 1, len(keys))
+        page.evaluate("i => window.asfShowDeck(i)", self._deck)
+        page.evaluate("m => window.asfSetMode(m)", self._mode)
+        if self._mode == "video":
+            if self._video is None:
+                page.evaluate("() => window.asfBlack()")
+            else:
+                page.evaluate("u => window.asfHoldEnd(u)", _video_uri(self._video))
+        else:
+            _focus_slides(page)
+        if self._last_view is not None:
+            page.evaluate("v => window.asfUpdate(v)", self._last_view)
+
+    def _apply(self, page, op: str, arg) -> None:
+        """Apply one queued command. The state it leads to is recorded
+        first, so a window that dies mid-command still reopens showing
+        what was meant."""
+        if op == "press":
+            self._presses.setdefault(self._deck, []).append(arg)
+            # Re-focus every time: key events only reach the
+            # deck while its iframe holds focus.
+            _focus_slides(page)
+            page.keyboard.press(arg)
+            logger.info("Sent key press: %s", arg)
+        elif op == "panel":
+            with self._view_lock:
+                view, self._pending_view = self._pending_view, None
+            if view is not None:
+                self._last_view = view
+                page.evaluate("v => window.asfUpdate(v)", view)
+        elif op == "reset":
+            if self._mode == "video":
+                self._video = None
+                page.evaluate("() => window.asfBlack()")
+                logger.info("Video reset to black")
+            else:
+                self._presses[self._deck] = []
+                page.evaluate("() => window.asfResetSlides()")
+                self._wait_slides_loaded(page)
+                logger.info("Slides reset to slide 1")
+        elif op == "deck":
+            self._deck = arg
+            page.evaluate("i => window.asfShowDeck(i)", arg)
+            if self._mode == "slides":
+                _focus_slides(page)
+            logger.info("Showing deck %d", arg + 1)
+        elif op == "mode":
+            self._mode = arg
+            page.evaluate("m => window.asfSetMode(m)", arg)
+            if arg == "video":
+                self._video = None
+                page.evaluate("() => window.asfBlack()")
+            else:
+                _focus_slides(page)
+            logger.info("Audience screen mode: %s", arg)
+        elif op == "play":
+            path, next_path = arg
+            # A scene stays on its last frame once it ends, so that frame
+            # is what a reopened screen shows.
+            self._video = path
+            res = page.evaluate(
+                "([u, n]) => window.asfPlay(u, n)",
+                [_video_uri(path), _video_uri(next_path) if next_path else None],
+            )
+            if res["error"]:
+                logger.error("動画を再生できません: %s (%s)", path, res["error"])
+            else:
+                logger.info("Playing video: %s", Path(path).name)
+            if res["cut"]:
+                # The scene was longer than this performance's
+                # gap between triggers: shorten the file.
+                logger.warning(
+                    "前のシーンが終わる前に次のシーンへ切り替えました "
+                    "(→ %s)。前のシーン動画を短くすることを検討してください",
+                    Path(path).name,
+                )
+        elif op == "hold":
+            self._video = arg
+            if arg is None:
+                page.evaluate("() => window.asfBlack()")
+                logger.info("Video held on black")
+            else:
+                res = page.evaluate("u => window.asfHoldEnd(u)", _video_uri(arg))
+                if res["error"]:
+                    logger.error("動画の最終フレームを表示できません: %s (%s)",
+                                 arg, res["error"])
+                else:
+                    logger.info("Holding last frame of: %s", Path(arg).name)
+        else:
+            logger.warning("Unknown slide controller command: %s", op)
 
     def _probe_videos(self, page) -> None:
         """Check every scene video decodes in this browser; log durations."""
@@ -456,6 +568,23 @@ class SlideController:
 def _video_uri(path: str) -> str:
     # host.html is itself a file:// page, so file:// videos are same-origin.
     return Path(path).resolve().as_uri()
+
+
+def _screen_alive(browser, page) -> bool:
+    """Whether the audience window is still open.
+
+    is_closed() / is_connected() alone never turn False while the worker
+    idles: the sync API only processes Playwright's events (page closed,
+    browser gone) during a call, and an idle loop makes none. The no-op
+    evaluate is that call, and it raises once the page is gone.
+    """
+    if page.is_closed() or not browser.is_connected():
+        return False
+    try:
+        page.evaluate("1")
+    except Exception:  # noqa: BLE001
+        return False
+    return not page.is_closed()
 
 
 def _focus_slides(page) -> None:
