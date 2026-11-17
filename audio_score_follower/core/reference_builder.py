@@ -460,6 +460,7 @@ def build_reference(
     reference_end_trim_sec: float = 0.0,
     tempo_map: Optional[tuple[np.ndarray, np.ndarray]] = None,
     plot: bool = False,
+    score_path: Optional[Path] = None,
 ) -> BuildResult:
     """Build offline artifacts from a score-synth WAV and a reference recording.
 
@@ -648,6 +649,11 @@ def build_reference(
         ),
         "tuning_offset_score_cents": float(score_tuning),
         "tuning_offset_ref_cents": float(ref_tuning),
+        # Inputs of this build, so the build screen can show what a
+        # rebuild would overwrite (the config only names the output dir).
+        # score_path is the MusicXML; score_wav is only a synth temp file.
+        "score_path": str(Path(score_path).resolve()) if score_path else None,
+        "reference_path": str(Path(reference_wav).resolve()),
     }
     meta_path = output_dir / "build_meta.json"
     meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))

@@ -1014,7 +1014,9 @@ class _LauncherWindow:
         self._abort_measure()  # release the measurement mic before navigating
         from audio_score_follower.ui.build_window import run_build_window
 
-        generated = run_build_window(self.root, self.config_dir)
+        generated = run_build_window(
+            self.root, self.config_dir, self._current_config_path()
+        )
         if generated is None:
             return
         self._refresh_config_list()

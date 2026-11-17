@@ -492,6 +492,7 @@ def main() -> int:
             reference_end_trim_sec=end_trim,
             tempo_map=tempo_map,
             plot=args.plot,
+            score_path=args.score,
         )
         logger.info(
             "Build complete: warp path length=%d, ref_dur=%.1fs, score_dur=%.1fs",
