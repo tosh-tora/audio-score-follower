@@ -9,7 +9,7 @@ per-frame advance smoothness. Optionally dumps a per-frame CSV for
 before/after comparison of parameter changes.
 
 Usage:
-    python tasks/eval_tracking.py --built-dir data/built/幻想4 \\
+    python tasks/eval_tracking.py --built-dir data/built/幻想交響曲4 \\
         --score data/scores/幻想4_リピート削除.mxl \\
         --input-wav data/recordings/alt_performance.wav \\
         [--csv out.csv] [--start-offset 3.0] \\

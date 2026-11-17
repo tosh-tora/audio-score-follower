@@ -257,7 +257,7 @@ GUI を起動せず最速で追従品質を数値化するツール。パラメ�
 
 ```powershell
 python tasks/eval_tracking.py `
-    --built-dir data/built/幻想4 `
+    --built-dir data/built/幻想交響曲4 `
     --score data/scores/幻想4_リピート削除.mxl `
     --input-wav "data/reference_audio/<録音>.mp3" `
     [--csv out.csv] `
