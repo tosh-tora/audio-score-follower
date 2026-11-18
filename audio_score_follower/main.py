@@ -56,6 +56,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from audio_score_follower import launch_options
+from audio_score_follower.keep_awake import keep_awake
 from audio_score_follower.config.loader import ConfigError, ConfigLoader, is_video_movement
 from audio_score_follower.core.audio_level import AudioLevelMonitor
 from audio_score_follower.core.cooldown_timer import CooldownTimer
@@ -982,6 +983,14 @@ def main() -> int:
     )
     for noisy in ("numba", "matplotlib", "asyncio", "PIL", "fontTools", "librosa"):
         logging.getLogger(noisy).setLevel(logging.INFO)
+
+    # Held for the whole launcher <-> console loop: an unattended concert
+    # must not let Windows blank the audience screen or sleep the PC.
+    with keep_awake():
+        return _main_after_logging(args)
+
+
+def _main_after_logging(args: argparse.Namespace) -> int:
 
     if args.config is not None:
         # CLI mode: behaviour unchanged; the persisted settings.launcher
