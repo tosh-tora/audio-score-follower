@@ -226,7 +226,8 @@
     document.getElementById("berlioz").dataset.mood = v.manual ? "manual" : v.status_level;
   };
 
-  // ---- Video movements. Python decides WHICH scene; this only plays it.
+  // ---- Video movements (scene triggers, or one untracked playback
+  // video). Python decides WHICH video and when; this only plays it.
   // Two <video> elements: the next scene starts in the hidden one and
   // fades in over the current one, so a scene change never shows a black
   // gap while the new file decodes. A finished scene simply stays on its
@@ -260,16 +261,34 @@
   const withTimeout = (p, ms, what) => Promise.race([p,
     new Promise((_, reject) => setTimeout(() => reject(new Error(what + " timed out")), ms))]);
 
-  // Play a scene from the top. Resolves {cut, error}: cut = the previous
-  // scene was still playing (scene longer than this performance's gap).
-  window.asfPlay = async (uri, nextUri) => {
+  const ready = (v) => v.readyState >= 1 ? Promise.resolve() : withTimeout(
+    new Promise((resolve, reject) => {
+      v.addEventListener("loadedmetadata", resolve, { once: true });
+      v.addEventListener("error", () => reject(new Error("load error")), { once: true });
+    }), 5000, "load");
+  // Just short of duration: seeking exactly to the end can paint black.
+  const lastFrame = (v) => Math.max(0, v.duration - 0.05);
+
+  // Play a video from `offset` seconds (0 = the top). Resolves {cut,
+  // error}: cut = the previous scene was still playing (scene longer than
+  // this performance's gap). An offset past the end (a reopened window
+  // whose video finished meanwhile) shows the last frame instead.
+  window.asfPlay = async (uri, nextUri, offset = 0) => {
     const my = ++token;
     const cur = front();
     const cut = !!cur && !cur.paused && !cur.ended;
-    const v = spare(uri);
+    // A playback movement's first frame is already on screen in `cur`:
+    // play that very element — fading to a second copy would only blink.
+    const v = cur && !cut && cur.dataset.uri === uri ? cur : spare(uri);
     load(v, uri);
-    v.currentTime = 0;
     try {
+      if (offset > 0) {
+        await ready(v);
+        if (offset >= lastFrame(v)) {
+          return { cut, error: (await window.asfHoldAt(uri, "end")).error };
+        }
+      }
+      v.currentTime = offset;
       await withTimeout(v.play(), 5000, "play");
     } catch (e) {
       return { cut, error: String(e) };
@@ -281,29 +300,36 @@
     return { cut, error: null };
   };
 
-  // Show a scene's last frame, still (manual ← : replaying it would show
-  // the scene's comments a second time).
-  window.asfHoldEnd = async (uri) => {
+  // Show one frame of a video, still: `at` seconds, or "end" for the last
+  // frame. 0 is a playback movement waiting for its start press; "end" is
+  // a scene undone by manual ← (replaying it would show its comments a
+  // second time); a number is a paused video on a reopened window.
+  window.asfHoldAt = async (uri, at) => {
     const my = ++token;
     const v = spare(uri);
     load(v, uri);
     v.pause();
     try {
-      if (v.readyState < 1) {
-        await withTimeout(new Promise((resolve, reject) => {
-          v.addEventListener("loadedmetadata", resolve, { once: true });
-          v.addEventListener("error", () => reject(new Error("load error")), { once: true });
-        }), 5000, "load");
-      }
+      await ready(v);
       const seeked = new Promise((resolve) => v.addEventListener("seeked", resolve, { once: true }));
-      // Just short of duration: seeking exactly to the end can paint black.
-      v.currentTime = Math.max(0, v.duration - 0.05);
+      v.currentTime = at === "end" ? lastFrame(v) : Math.min(at, lastFrame(v));
       await withTimeout(seeked, 5000, "seek");
     } catch (e) {
       return { error: String(e) };
     }
     show(v, my);
     return { error: null };
+  };
+  window.asfHoldEnd = (uri) => window.asfHoldAt(uri, "end");
+
+  // Stop the shown video where it is (operator's 「■ 演奏終了」 during a
+  // playback movement). Returns its position, or null when none is shown.
+  window.asfPause = () => {
+    ++token;  // a play still starting must not take over the screen
+    const v = front();
+    if (!v) return null;
+    v.pause();
+    return v.currentTime;
   };
 
   window.asfBlack = () => {

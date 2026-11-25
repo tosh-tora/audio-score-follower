@@ -627,3 +627,35 @@ class TestValidateMovementWavs:
 
     def test_mic_mode_ignores_missing_recordings(self, tmp_path):
         assert validate(_mic_opts(_multi_config(tmp_path))) == []
+
+
+class TestPlaybackMovementRow:
+    def _config(self, tmp_path):
+        movements = [
+            {"id": 1, "xml_file": "../s/幻想1.mxl", "built_dir": "b1",
+             "triggers": [{"measure": 1}], "input_wav": "1.mp3"},
+            {"id": 3, "video": "../movie/幻想3_全編.mp4"},
+        ]
+        path = tmp_path / "pb.json"
+        path.write_text(json.dumps({"movements": movements}, ensure_ascii=False),
+                        encoding="utf-8")
+        return path
+
+    def test_row_is_labelled_and_has_no_deck_or_recording(self, tmp_path):
+        rows = read_movement_rows(self._config(tmp_path))
+        assert rows[1].label == "3: 動画 幻想3_全編"
+        assert (rows[1].is_video, rows[1].is_playback) == (True, True)
+        assert (rows[1].slide_url, rows[1].input_wav) == (None, None)
+
+    def test_save_never_writes_deck_or_recording_to_it(self, tmp_path):
+        path = self._config(tmp_path)
+        rows = read_movement_rows(path)
+        rows[1].slide_url, rows[1].input_wav = "https://x", "x.mp3"
+        save_launcher_settings(path, _mic_opts(path), movement_rows=rows)
+        m3 = json.loads(path.read_text(encoding="utf-8"))["movements"][1]
+        assert m3 == {"id": 3, "video": "../movie/幻想3_全編.mp4"}
+
+    def test_wav_mode_does_not_ask_it_for_a_recording(self, tmp_path):
+        (tmp_path / "1.mp3").write_bytes(b"\x00")
+        path = self._config(tmp_path)
+        assert validate(LaunchOptions(config_path=path, input_source=INPUT_SOURCE_WAV)) == []

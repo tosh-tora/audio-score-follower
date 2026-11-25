@@ -6,7 +6,7 @@
 
 ## このシステムが実現すること（目的）
 
-**本番のオーケストラ演奏をマイクでリアルタイム追跡し、指定小節に到達したら Google Slides を自動でページ送りして聴衆向けの解説を表示する。** 追跡アルゴリズム（OLTW）はこの目的のための手段であり、最終出力はスライド操作である。トリガーに `video` を書いた楽章では、スライドの代わりにシーン動画を全画面で再生する。
+**本番のオーケストラ演奏をマイクでリアルタイム追跡し、指定小節に到達したら Google Slides を自動でページ送りして聴衆向けの解説を表示する。** 追跡アルゴリズム（OLTW）はこの目的のための手段であり、最終出力はスライド操作である。トリガーに `video` を書いた楽章では、スライドの代わりにシーン動画を全画面で再生する。楽章自体に `video` を書いた楽章（動画再生の楽章）は追随せず、1 本の動画を開始ボタンで流すだけ。
 
 ```
 マイク → OLTW 追随 → 小節番号 → トリガー判定 (core/trigger_engine.py)
@@ -39,7 +39,7 @@ AppState → ui/audience_panel.py → SlideController → 聴衆向け画面の�
 | トリガー発火ループ・手動 →/← オーバライド | `core/trigger_engine.py` |
 | OLTW 結果処理（小節マッピング・AppState 反映・viz push・表示確信度・ジャンプ検出） | `core/result_handler.py`（worker スレッドから毎フレーム呼ばれる） |
 | 楽章ロードの純構築部（失敗は `MovementLoadError`）。楽譜（`ScoreMapper`）は起動時に全楽章ぶん裏で先読みしてキャッシュし、N / P / R ではパースしない（`get_score_mapper` / `prewarm_scores`） | `core/movement_loader.py` |
-| 聴衆向け画面（`ui/audience/host.html`: 左に Slides `/embed` の iframe（デッキごとに 1 枚、重ねて表示中の 1 枚以外は隠す）、右に追随パネル）の Playwright 操作。外部モニターへの全画面配置、キュー経由の thread-safe キー送出・パネル更新・1 枚目リセット・デッキ切替（`show_deck`）、動画の楽章の表示切替（`set_mode`）・シーン再生・起動時の動画プローブ、閉じられた画面の自動再オープンと表示の復元 | `core/slide_controller.py`（動画レイヤーの描画は `ui/audience/host.html`） |
+| 聴衆向け画面（`ui/audience/host.html`: 左に Slides `/embed` の iframe（デッキごとに 1 枚、重ねて表示中の 1 枚以外は隠す）、右に追随パネル）の Playwright 操作。外部モニターへの全画面配置、キュー経由の thread-safe キー送出・パネル更新・1 枚目リセット・デッキ切替（`show_deck`）、動画の楽章の表示切替（`set_mode`）・シーン再生・動画再生の楽章の冒頭静止 / 一時停止・起動時の動画プローブ、閉じられた画面の自動再オープンと表示の復元 | `core/slide_controller.py`（動画レイヤーの描画は `ui/audience/host.html`） |
 | 聴衆向けパネルの表示内容（状態判定・確信度 1 秒更新・「人が調整！」）、モニター選択、`/embed` URL 変換、楽章 → デッキの解決（`resolve_decks`）（Tk / Playwright 非依存の純ロジック） | `ui/audience_panel.py` |
 | トリガーの小節単位クールダウン | `core/cooldown_timer.py` |
 | FluidSynth / SoundFont 検出の一本化 | `core/synth_locator.py`（**検出順を変えるときはここだけ触る**） |
@@ -79,6 +79,7 @@ AppState → ui/audience_panel.py → SlideController → 聴衆向け画面の�
 - `--slide-url` も `movements[].slide_url` も無いとき（かつ動画の楽章も無いとき）は `NullSlideController`（no-op）で**ドライラン**起動
 - **楽章ごとのデッキ**（`movements[].slide_url`、無ければ `--slide-url`）: `resolve_decks` が重複なしのデッキ一覧と楽章ごとの番号を決め、全デッキを起動時に並行で読み込んでおく。楽章ロード時に `main._load_movement` が `show_deck` → `set_mode` の順で呼ぶ（楽章間が短いので、切替は表示の入れ替えだけで再読み込みしない）。R の `reset_to_first` は表示中のデッキだけを再読み込みする
 - **動画の楽章**（トリガーに `video`。1 楽章は全トリガー video か全部無しかのどちらか）: `execute_action` はキーを送らず `_show_scene` に回す。"right" は **発火したトリガー自身の動画**を再生する（「次のファイル」ではないので、小節ジャンプで途中のトリガーが飛んでも後続がずれない）。"left"（手動 ←）は取り消したトリガーの 1 つ前の動画の最終フレームで静止（再生し直すとシーン内のコメントが二重に出る）。楽章ロード時に `main._load_movement` が `set_mode` で画面を切り替える。デッキの iframe は隠すだけなので、動画の楽章を挟んでもページ位置は保たれる
+- **動画再生の楽章**（楽章に `video`。`config.loader.is_playback_movement`）: `main._load_playback_movement` が楽譜・OLTW・worker を作らず `set_mode("video")` → `hold_video_start` で冒頭フレームを出す。トリガーは空なので `TriggerEngine` は何もしない。「▶ 演奏開始」(`manual_start`) が `play_video`、「■ 演奏終了」が `pause_video`。R / P は `reset_to_first` を呼ばない（video モードの reset は黒にするため、ロードで戻した冒頭フレームが消える）。→/← は無効
 - 手動オーバライド: →/Space で次の未発火トリガーへ進めて発火済みにマーク + OLTW seek、← で直前の発火を取り消して戻る（発火順は小節順管理）
 
 ### 演奏終了（「■ 演奏終了」ボタン / E キー、Issue #44）

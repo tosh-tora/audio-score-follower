@@ -268,3 +268,9 @@ def test_resolve_status_clears_the_hysteresis_when_confidence_recovers():
         _tracking(), conf_level="good", now=100.0, low_since=50.0
     )
     assert low_since is None
+
+
+def test_resolve_decks_skips_playback_movements():
+    decks, index = resolve_decks([{"video": "m3.mp4"}, _mv()], DECK.format("A"))
+    assert decks == [to_embed_url(DECK.format("A"))]
+    assert index == [None, 0]

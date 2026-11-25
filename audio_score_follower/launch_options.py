@@ -210,6 +210,8 @@ def _missing_movement_wavs(
             return []  # the launcher already shows config read errors
     errors = []
     for row in rows:
+        if row.is_playback:
+            continue  # nothing is followed, so nothing is fed
         if not row.input_wav:
             errors.append(f"楽章 {row.label}: 音源ファイルが指定されていません")
         elif not _resolve_against(config_path, row.input_wav).is_file():
@@ -319,14 +321,16 @@ def read_launcher_settings(config_path: Path) -> dict:
 class MovementRow:
     """One row of the launcher's per-movement table (slide deck + recording).
 
-    Blank values are None. ``is_video``: the movement plays scene videos,
-    so it has no deck.
+    Blank values are None. ``is_video``: the movement is shown on the video
+    layer, so it has no deck. ``is_playback``: it only plays one video,
+    untracked, so it has no recording either.
     """
 
     label: str
     slide_url: Optional[str] = None
     input_wav: Optional[str] = None
     is_video: bool = False
+    is_playback: bool = False
 
 
 def _resolve_against(config_path: Path, raw: str) -> Path:
@@ -367,6 +371,13 @@ def read_movement_rows(config_path: Path) -> list[MovementRow]:
 
     rows = []
     for i, m in enumerate(movements):
+        if "video" in m:  # playback movement (config.loader.is_playback_movement)
+            rows.append(MovementRow(
+                label=f"{m.get('id', i + 1)}: 動画 {Path(str(m['video'])).stem}",
+                is_video=True,
+                is_playback=True,
+            ))
+            continue
         triggers = m.get("triggers") if isinstance(m.get("triggers"), list) else []
         is_video = any(isinstance(t, dict) and "video" in t for t in triggers)
         score = Path(str(m["xml_file"])).stem if m.get("xml_file") else "楽譜自動検出"
@@ -410,6 +421,8 @@ def save_launcher_settings(
                 "楽章の数が読み込み時から変わっています。設定ファイルを選び直してください"
             )
         for movement, row in zip(movements, movement_rows):
+            if row.is_playback:
+                continue  # neither key is allowed on a playback movement
             for key, value in (("slide_url", row.slide_url), ("input_wav", row.input_wav)):
                 value = _blank_to_none(value)
                 if value is None or (key == "slide_url" and row.is_video):

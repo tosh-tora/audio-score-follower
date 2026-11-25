@@ -895,7 +895,15 @@ class _LauncherWindow:
             )
             button.grid(row=i, column=3, sticky="nswe", padx=(6, 0))
             self._movement_vars.append((url_var, wav_var))
-            self._movement_wav_widgets += [entry_wav, button]
+            if row.is_playback:
+                # Untracked: no recording to feed. Left out of
+                # _movement_wav_widgets so wav mode does not re-enable it.
+                url_var.set("（動画再生のみ）")
+                wav_var.set("（動画再生のみ）")
+                for widget in (entry_wav, button):
+                    widget.configure(state="disabled")
+            else:
+                self._movement_wav_widgets += [entry_wav, button]
 
         if canvas is not None:
             grid.update_idletasks()
@@ -913,8 +921,9 @@ class _LauncherWindow:
             MovementRow(
                 label=row.label,
                 slide_url=None if row.is_video else (url_var.get().strip() or None),
-                input_wav=wav_var.get().strip() or None,
+                input_wav=None if row.is_playback else (wav_var.get().strip() or None),
                 is_video=row.is_video,
+                is_playback=row.is_playback,
             )
             for row, (url_var, wav_var) in zip(self._movement_rows, self._movement_vars)
         ]

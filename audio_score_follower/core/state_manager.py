@@ -143,6 +143,11 @@ class AppState:
         # None = never.
         self.manual_adjust_at: Optional[float] = None
 
+        # Playback movement (one untracked video): {"duration",
+        # "started_at", "paused_at"} (seconds / time.monotonic(); None =
+        # unknown / not yet). None = a tracked movement.
+        self.playback: Optional[dict] = None
+
     def get_all(self) -> dict:
         """
         Atomically get snapshot of all state.
@@ -182,6 +187,7 @@ class AppState:
                 'inertia_elapsed_sec': self.inertia_elapsed_sec,
                 'inertia_cap_sec': self.inertia_cap_sec,
                 'manual_adjust_at': self.manual_adjust_at,
+                'playback': self.playback,
             }
 
     def update_beat_measure(
@@ -273,6 +279,7 @@ class AppState:
             self.next_trigger_measure = None
             self.prev_trigger_measure = DEFAULT_PREV_TRIGGER_MEASURE
             self.performance_ended = False
+            self.playback = None
 
     def set_mic_level(
         self,
@@ -299,6 +306,22 @@ class AppState:
         """Record the configured silence-gate threshold for GUI display."""
         with self._lock:
             self.silence_threshold_db = threshold_db
+
+    def set_playback(
+        self,
+        *,
+        duration: Optional[float] = None,
+        started_at: Optional[float] = None,
+        paused_at: Optional[float] = None,
+    ) -> None:
+        """Mark the loaded movement as a playback movement (after
+        set_movement, which clears it) and record its progress."""
+        with self._lock:
+            self.playback = {
+                "duration": duration,
+                "started_at": started_at,
+                "paused_at": paused_at,
+            }
 
     def set_waiting_for_start(self, waiting: bool):
         """Update the mic-mode manual-start waiting flag."""

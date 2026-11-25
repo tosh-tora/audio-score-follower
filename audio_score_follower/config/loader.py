@@ -22,9 +22,23 @@ class ConfigError(ValueError):
     """Raised when config.json has a syntax error or invalid structure."""
 
 
+# Keys a playback movement must not carry: it is not tracked, so a score,
+# build, recording, deck or trigger would be silently ignored — an error
+# says so instead of letting the operator believe they take effect.
+_PLAYBACK_FORBIDDEN = ("triggers", "slide_url", "input_wav", "xml_file", "built_dir")
+
+
+def is_playback_movement(movement: Dict) -> bool:
+    """A movement that only plays one video, untracked (``video`` on the movement)."""
+    return "video" in movement
+
+
 def is_video_movement(movement: Dict) -> bool:
-    """A movement whose triggers play scene videos (validated: all or none)."""
-    return any("video" in t for t in movement.get("triggers", []))
+    """A movement shown on the video layer: a playback movement, or one
+    whose triggers play scene videos (validated: all or none)."""
+    return is_playback_movement(movement) or any(
+        "video" in t for t in movement.get("triggers", [])
+    )
 
 
 class ConfigLoader:
@@ -61,6 +75,10 @@ class ConfigLoader:
               "triggers": [
                 {"measure": 1, "video": "scenes/01_millet.mp4", "note": "ミレー"}
               ]
+            },
+            {
+              "id": 3,
+              "video": "../data/movie/fantastique3.mp4"
             }
           ]
         }
@@ -69,6 +87,11 @@ class ConfigLoader:
     this file, resolved to an absolute path here) instead of pressing a
     key on the deck. A movement is all-video or all-slides; the audience
     screen switches between the two when the movement loads.
+
+    ``video`` on the movement itself makes a playback movement: no
+    tracking at all (no score, build, triggers or recording), just that
+    one video fullscreen — its first frame on load, played on the start
+    press, left on its last frame.
 
     ``slide_url`` (optional, slides movements only) gives the movement its
     own deck; without it the movement uses the ``--slide-url`` deck. Every
@@ -135,6 +158,10 @@ class ConfigLoader:
 
         for mv_idx, movement in enumerate(self.movements):
             mv = f"movements[{mv_idx}]"
+
+            if is_playback_movement(movement):
+                self._validate_playback(movement, mv)
+                continue
 
             if not movement.get("xml_file"):
                 discovered = self._auto_discover_mxl()
@@ -220,6 +247,22 @@ class ConfigLoader:
                 trig["action"] = action
 
         logger.debug("Config validation passed (%d movements)", len(self.movements))
+
+    def _validate_playback(self, movement: Dict, mv: str) -> None:
+        """A playback movement: only its video (plus id / note) is allowed."""
+        extra = [k for k in _PLAYBACK_FORBIDDEN if k in movement]
+        if extra:
+            raise ConfigError(
+                f"{mv}: 動画再生の楽章（'video' 指定）は追随しないため "
+                f"{', '.join(repr(k) for k in extra)} は指定できません"
+            )
+        raw = movement["video"]
+        if not isinstance(raw, str) or not raw.strip():
+            raise ConfigError(f"{mv}.video: 動画ファイルのパス（文字列）が必要です")
+        video = Path(self.resolve_path(raw))
+        if not video.is_file():
+            raise ConfigError(f"{mv}.video: ファイルが見つかりません: {video}")
+        movement["video"] = str(video)
 
     def has_video_movements(self) -> bool:
         """True when any movement plays scene videos instead of the deck."""
