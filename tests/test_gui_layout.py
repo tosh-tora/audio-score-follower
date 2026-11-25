@@ -412,3 +412,24 @@ def test_config_error_clears_the_movement_table(root, tmp_path, monkeypatch):
     win._show_movement_rows(_long_movement_rows(3))
     win._set_config_error("broken.json: JSON 構文エラー")
     assert win._collect_movement_rows() == []
+
+
+def test_launcher_fits_with_a_playback_row(root, tmp_path, monkeypatch):
+    # 動画再生の楽章の行は、スライド URL 欄のセルに動画パス＋「参照…」が入る
+    from audio_score_follower.launch_options import MovementRow
+
+    win = _build_launcher(root, tmp_path, monkeypatch)
+    rows = _long_movement_rows(4)
+    long_video = "C:/" + "very_long_directory_name/" * 6 + "幻想3_全編.mp4"
+    rows.insert(1, MovementRow(
+        label="3: 動画 幻想3_全編_とても長い動画ファイル名", input_wav=rows[0].input_wav,
+        is_video=True, is_playback=True, video=long_video,
+    ))
+    win._show_movement_rows(rows)
+    win.label_config_error.configure(text="")
+    win.label_config_error.grid_remove()
+    root.update_idletasks()
+    assert root.winfo_reqwidth() <= SCREEN_W
+    assert root.winfo_reqheight() <= SCREEN_H - 40
+    collected = win._collect_movement_rows()[1]
+    assert (collected.video, collected.input_wav) == (long_video, rows[0].input_wav)

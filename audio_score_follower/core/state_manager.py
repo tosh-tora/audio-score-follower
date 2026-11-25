@@ -145,7 +145,8 @@ class AppState:
 
         # Playback movement (one untracked video): {"duration",
         # "started_at", "paused_at"} (seconds / time.monotonic(); None =
-        # unknown / not yet). None = a tracked movement.
+        # unknown / not yet) and "audio" (recording played along, or None).
+        # None = a tracked movement.
         self.playback: Optional[dict] = None
 
     def get_all(self) -> dict:
@@ -313,14 +314,17 @@ class AppState:
         duration: Optional[float] = None,
         started_at: Optional[float] = None,
         paused_at: Optional[float] = None,
+        audio: Optional[str] = None,
     ) -> None:
         """Mark the loaded movement as a playback movement (after
-        set_movement, which clears it) and record its progress."""
+        set_movement, which clears it) and record its progress. ``audio``:
+        name of the recording played along with it, if any."""
         with self._lock:
             self.playback = {
                 "duration": duration,
                 "started_at": started_at,
                 "paused_at": paused_at,
+                "audio": audio,
             }
 
     def set_waiting_for_start(self, waiting: bool):

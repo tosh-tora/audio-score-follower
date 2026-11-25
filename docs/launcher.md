@@ -15,6 +15,7 @@ CLI フラグと config スキーマの詳細は **README.md が正本**。こ�
 - config の保存は raw JSON の read→update→write（`ConfigLoader` 経由にしない — movements 検証で保存がブロックされるため）。`ensure_ascii=False` / `indent=2` / tempfile + `os.replace` でアトミック
 - **楽章ごとのスライド URL・音源は config の `movements[]` が正本**（`slide_url` / `input_wav`）。ランチャーの楽章表は `read_movement_rows` で読み、「開始」で `save_launcher_settings(movement_rows=...)` が各楽章に書き戻す。アプリはランチャーから URL・音源を受け取らず config から読む（ランチャーは `LaunchOptions.slide_url` / `input_wav` を None で渡す。どちらも CLI 専用）。ファイル入力の検証は保存前なので、`validate(opts, movement_rows=...)` に編集中の表を渡す
 - 旧形式の `settings.launcher.slide_url` / `input_wav` は読み込み時に表へ移し、保存時に消える。**音源は 1 楽章の config のときだけ移す**: 複数楽章の config に残った旧 `input_wav` はどれか 1 楽章の録音で、全楽章に入れると違う曲で追随してしまう
+- 動画再生の楽章（`video`）の行は、スライド URL 欄が動画パス（同じセル内に「参照…」。列を増やすと 1280x800 を超える）、音源欄が動画と一緒に流す任意の録音（`MovementRow.video` / `input_wav`）。動画の有無はどの入力モードでも検証する（`_missing_movement_videos`）
 - 楽章表は 5 楽章まで 1280x800 に収める（`tests/test_gui_layout.py`）。行は小さいフォント・細いボタンで詰めてあり、6 楽章以上は高さ固定の Canvas でスクロールする。読めない config を選んだら表を空にする（前の config の楽章が別の config に保存されるのを防ぐ。エラー行と満杯の表が同時に出ないことが高さ予算の前提でもある）
 - デバイスは index + 名前スナップショットの両方を保存し、次回起動時に名前一致で index を再マッチする（Windows はデバイス番号が変動するため）
 - 「再検出」ボタンも同じ名前一致で選択を引き継ぐ。PortAudio は初期化時のデバイス一覧をキャッシュするので、再検出は `reinitialize_portaudio()`（terminate → initialize）してから列挙し直す。terminate は開いているストリームを無効にするため、無音測定中なら先に中断する

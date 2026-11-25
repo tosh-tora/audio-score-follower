@@ -122,15 +122,16 @@ def playback_mode(state: dict, now: float) -> tuple[str, str]:
     pb = state["playback"]
     duration = pb.get("duration")
     started = pb.get("started_at")
+    sound = "＋♪音源" if pb.get("audio") else ""
     if state.get("waiting_for_start") or started is None:
-        return "🎬 動画再生（▶ 演奏開始 で再生）", "waiting"
+        return f"🎬 動画再生{sound}（▶ 演奏開始 で再生）", "waiting"
     elapsed = (pb.get("paused_at") or now) - started
     if duration is not None and elapsed >= duration:
         return "🎬 再生終了（最終シーンで静止）", "waiting"
     total = f" / {_mmss(duration)}" if duration is not None else ""
     if state.get("performance_ended"):
         return f"⏸ 一時停止 {_mmss(elapsed)}{total}（R で冒頭へ / N で次の曲）", "checking"
-    return f"🎬 再生中 {_mmss(elapsed)}{total}", "tracking"
+    return f"🎬 再生中{sound} {_mmss(elapsed)}{total}", "tracking"
 
 
 class FollowerGUI:

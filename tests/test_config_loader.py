@@ -180,7 +180,7 @@ def test_playback_movement_needs_no_score_or_build(tmp_path):
 
 
 @pytest.mark.parametrize("key, value", [
-    ("triggers", []), ("slide_url", "https://x"), ("input_wav", "a.mp3"),
+    ("triggers", []), ("slide_url", "https://x"),
     ("xml_file", "a.mxl"), ("built_dir", "b"),
 ])
 def test_playback_movement_rejects_tracking_keys(tmp_path, key, value):
@@ -193,3 +193,9 @@ def test_playback_movement_missing_video_is_rejected(tmp_path):
     path.write_text(json.dumps({"movements": [{"id": 3, "video": "none.mp4"}]}), encoding="utf-8")
     with pytest.raises(ConfigError, match="見つかりません"):
         ConfigLoader(str(path))
+
+
+def test_playback_movement_may_have_a_recording(tmp_path):
+    # 音源ファイル入力で動画と一緒に流す録音。存在確認は起動時の validate が行う
+    loader = ConfigLoader(str(_write_playback(tmp_path, input_wav="rec/3.mp3")))
+    assert loader.movements[0]["input_wav"] == str((tmp_path / "rec" / "3.mp3").resolve())

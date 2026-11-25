@@ -630,32 +630,50 @@ class TestValidateMovementWavs:
 
 
 class TestPlaybackMovementRow:
-    def _config(self, tmp_path):
+    def _config(self, tmp_path, **m3):
+        (tmp_path / "movie").mkdir(exist_ok=True)
+        (tmp_path / "movie" / "幻想3_全編.mp4").write_bytes(b"\x00")
+        (tmp_path / "1.mp3").write_bytes(b"\x00")
         movements = [
             {"id": 1, "xml_file": "../s/幻想1.mxl", "built_dir": "b1",
              "triggers": [{"measure": 1}], "input_wav": "1.mp3"},
-            {"id": 3, "video": "../movie/幻想3_全編.mp4"},
+            {"id": 3, "video": "movie/幻想3_全編.mp4", **m3},
         ]
         path = tmp_path / "pb.json"
         path.write_text(json.dumps({"movements": movements}, ensure_ascii=False),
                         encoding="utf-8")
         return path
 
-    def test_row_is_labelled_and_has_no_deck_or_recording(self, tmp_path):
-        rows = read_movement_rows(self._config(tmp_path))
+    def test_row_carries_video_and_recording(self, tmp_path):
+        rows = read_movement_rows(self._config(tmp_path, input_wav="3.mp3"))
         assert rows[1].label == "3: 動画 幻想3_全編"
         assert (rows[1].is_video, rows[1].is_playback) == (True, True)
-        assert (rows[1].slide_url, rows[1].input_wav) == (None, None)
+        assert (rows[1].video, rows[1].input_wav, rows[1].slide_url) == (
+            "movie/幻想3_全編.mp4", "3.mp3", None)
 
-    def test_save_never_writes_deck_or_recording_to_it(self, tmp_path):
+    def test_save_writes_video_and_recording_but_no_deck(self, tmp_path):
         path = self._config(tmp_path)
         rows = read_movement_rows(path)
-        rows[1].slide_url, rows[1].input_wav = "https://x", "x.mp3"
+        rows[1].video, rows[1].input_wav, rows[1].slide_url = "C:/v/new.mp4", "C:/r/3.mp3", "https://x"
         save_launcher_settings(path, _mic_opts(path), movement_rows=rows)
         m3 = json.loads(path.read_text(encoding="utf-8"))["movements"][1]
-        assert m3 == {"id": 3, "video": "../movie/幻想3_全編.mp4"}
+        assert m3 == {"id": 3, "video": "C:/v/new.mp4", "input_wav": "C:/r/3.mp3"}
+        rows[1].input_wav = None  # 空欄で音源を外せる
+        save_launcher_settings(path, _mic_opts(path), movement_rows=rows)
+        assert "input_wav" not in json.loads(path.read_text(encoding="utf-8"))["movements"][1]
 
-    def test_wav_mode_does_not_ask_it_for_a_recording(self, tmp_path):
-        (tmp_path / "1.mp3").write_bytes(b"\x00")
+    def test_video_is_required_in_every_mode(self, tmp_path):
         path = self._config(tmp_path)
-        assert validate(LaunchOptions(config_path=path, input_source=INPUT_SOURCE_WAV)) == []
+        rows = read_movement_rows(path)
+        rows[1].video = None
+        assert any("動画ファイルが指定されていません" in e
+                   for e in validate(_mic_opts(path), movement_rows=rows))
+        rows[1].video = "movie/none.mp4"
+        assert any("動画ファイルが見つかりません" in e
+                   for e in validate(_mic_opts(path), movement_rows=rows))
+
+    def test_wav_mode_recording_is_optional_but_must_exist(self, tmp_path):
+        opts = lambda p: LaunchOptions(config_path=p, input_source=INPUT_SOURCE_WAV)  # noqa: E731
+        assert validate(opts(self._config(tmp_path))) == []
+        errors = validate(opts(self._config(tmp_path, input_wav="none.mp3")))
+        assert len(errors) == 1 and "見つかりません" in errors[0]

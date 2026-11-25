@@ -34,6 +34,7 @@ AppState → ui/audience_panel.py → SlideController → 聴衆向け画面の�
 | 特徴量 (CENS + onset) の抽出・融合コスト | `core/feature_extractor.py`（**オフラインビルドと本番が共有する唯一の経路**） |
 | ref_time ↔ score_time ↔ measure の変換・warp path 検証 | `core/warp_lookup.py` / `core/score_mapper.py` |
 | マイク dBFS 監視 + silence 判定 | `core/audio_level.py` |
+| 動画再生の楽章で動画と一緒に流す録音（裏でデコード、開始押下で再生） | `core/audio_player.py` |
 | マイクの NC（ノイズ抑制）フィルター検出 | `core/mic_effects_probe.py` |
 | Tkinter 起動・composition root・キーバインド・silence-gate poll | `main.py`（各エンジンを配線する薄い orchestrator） |
 | トリガー発火ループ・手動 →/← オーバライド | `core/trigger_engine.py` |
@@ -79,7 +80,7 @@ AppState → ui/audience_panel.py → SlideController → 聴衆向け画面の�
 - `--slide-url` も `movements[].slide_url` も無いとき（かつ動画の楽章も無いとき）は `NullSlideController`（no-op）で**ドライラン**起動
 - **楽章ごとのデッキ**（`movements[].slide_url`、無ければ `--slide-url`）: `resolve_decks` が重複なしのデッキ一覧と楽章ごとの番号を決め、全デッキを起動時に並行で読み込んでおく。楽章ロード時に `main._load_movement` が `show_deck` → `set_mode` の順で呼ぶ（楽章間が短いので、切替は表示の入れ替えだけで再読み込みしない）。R の `reset_to_first` は表示中のデッキだけを再読み込みする
 - **動画の楽章**（トリガーに `video`。1 楽章は全トリガー video か全部無しかのどちらか）: `execute_action` はキーを送らず `_show_scene` に回す。"right" は **発火したトリガー自身の動画**を再生する（「次のファイル」ではないので、小節ジャンプで途中のトリガーが飛んでも後続がずれない）。"left"（手動 ←）は取り消したトリガーの 1 つ前の動画の最終フレームで静止（再生し直すとシーン内のコメントが二重に出る）。楽章ロード時に `main._load_movement` が `set_mode` で画面を切り替える。デッキの iframe は隠すだけなので、動画の楽章を挟んでもページ位置は保たれる
-- **動画再生の楽章**（楽章に `video`。`config.loader.is_playback_movement`）: `main._load_playback_movement` が楽譜・OLTW・worker を作らず `set_mode("video")` → `hold_video_start` で冒頭フレームを出す。トリガーは空なので `TriggerEngine` は何もしない。「▶ 演奏開始」(`manual_start`) が `play_video`、「■ 演奏終了」が `pause_video`。R / P は `reset_to_first` を呼ばない（video モードの reset は黒にするため、ロードで戻した冒頭フレームが消える）。→/← は無効
+- **動画再生の楽章**（楽章に `video`。`config.loader.is_playback_movement`）: `main._load_playback_movement` が楽譜・OLTW・worker を作らず `set_mode("video")` → `hold_video_start` で冒頭フレームを出す。トリガーは空なので `TriggerEngine` は何もしない。「▶ 演奏開始」(`manual_start`) が `play_video`、「■ 演奏終了」が `pause_video`。音源ファイル入力＋同時再生なら楽章の `input_wav` を `AudioPlayer` で一緒に鳴らし、`_stop_worker` で止める。R / P は `reset_to_first` を呼ばない（video モードの reset は黒にするため、ロードで戻した冒頭フレームが消える）。→/← は無効
 - 手動オーバライド: →/Space で次の未発火トリガーへ進めて発火済みにマーク + OLTW seek、← で直前の発火を取り消して戻る（発火順は小節順管理）
 
 ### 演奏終了（「■ 演奏終了」ボタン / E キー、Issue #44）

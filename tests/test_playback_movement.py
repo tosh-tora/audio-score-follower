@@ -38,6 +38,9 @@ def _app(tmp_path):
     app._performance_ended = False
     app.oltw = MagicMock()
     app.warp_lookup = app.score_mapper = None
+    app._file_input = False
+    app.play_audio = False
+    app.input_wav = None
     return app, str(video)
 
 
@@ -58,7 +61,8 @@ def test_load_shows_first_frame_without_tracking(tmp_path):
     sc.hold_video_start.assert_called_once_with(video)
     s = app.state.get_all()
     assert s["waiting_for_start"]
-    assert s["playback"] == {"duration": 600.0, "started_at": None, "paused_at": None}
+    assert s["playback"] == {"duration": 600.0, "started_at": None, "paused_at": None,
+                             "audio": None}
     assert app.state.current_triggers == []
     assert not app.is_performing()
     assert can_return_to_launcher(s)
@@ -130,3 +134,65 @@ def test_console_mode_text():
     pb["paused_at"] = 130.0
     text, _ = playback_mode({**base, "performance_ended": True, "playback": pb}, 800.0)
     assert text.startswith("⏸ 一時停止 0:30 / 10:00")
+
+
+# ------------------------------------------------- 動画と一緒に流す音源
+def _with_audio(tmp_path, monkeypatch, *, file_input=True, play_audio=True, exists=True):
+    import audio_score_follower.main as main_mod
+
+    created = []
+
+    class _Player:
+        def __init__(self, path, on_error=None):
+            self.path = path
+            self.calls = []
+            created.append(self)
+
+        def load(self):
+            self.calls.append("load")
+
+        def play(self):
+            self.calls.append("play")
+
+        def stop(self):
+            self.calls.append("stop")
+
+    monkeypatch.setattr(main_mod, "AudioPlayer", _Player)
+    app, video = _app(tmp_path)
+    rec = tmp_path / "3.mp3"
+    if exists:
+        rec.write_bytes(b"\x00")
+    app.config.movements[1]["input_wav"] = str(rec)
+    app._file_input, app.play_audio = file_input, play_audio
+    return app, created
+
+
+def test_recording_plays_and_stops_with_the_video(tmp_path, monkeypatch):
+    app, created = _with_audio(tmp_path, monkeypatch)
+    assert app._load_current_movement()
+    (player,) = created
+    assert player.calls == ["load"]
+    assert app.state.get_all()["playback"]["audio"] == "3.mp3"
+    app.manual_start()
+    app.end_performance()
+    assert player.calls == ["load", "play", "stop"]
+    assert app._load_current_movement()  # R: 前の音源は止めて作り直す
+    assert player.calls[-1] == "stop" and len(created) == 2
+
+
+def test_no_recording_unless_file_input_with_play_audio(tmp_path, monkeypatch):
+    for file_input, play_audio in ((False, True), (True, False)):
+        app, created = _with_audio(
+            tmp_path, monkeypatch, file_input=file_input, play_audio=play_audio)
+        assert app._load_current_movement()
+        assert created == []
+        assert app.state.get_all()["playback"]["audio"] is None
+
+
+def test_missing_recording_keeps_the_current_movement(tmp_path, monkeypatch):
+    app, created = _with_audio(tmp_path, monkeypatch, exists=False)
+    previous_worker = app.worker
+    assert app._load_current_movement() is False
+    previous_worker.stop.assert_not_called()
+    assert "音源ファイルがありません" in app.state.get_all()["load_error"]
+    assert created == []
