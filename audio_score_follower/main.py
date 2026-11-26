@@ -57,8 +57,14 @@ if hasattr(sys.stderr, "reconfigure"):
 
 from audio_score_follower import launch_options
 from audio_score_follower.keep_awake import keep_awake
-from audio_score_follower.config.loader import ConfigError, ConfigLoader, is_video_movement
+from audio_score_follower.config.loader import (
+    ConfigError,
+    ConfigLoader,
+    is_playback_movement,
+    is_video_movement,
+)
 from audio_score_follower.core.audio_level import AudioLevelMonitor
+from audio_score_follower.core.audio_player import AudioPlayer
 from audio_score_follower.core.cooldown_timer import CooldownTimer
 from audio_score_follower.core.follower_worker import FileWorker, FollowerWorker
 from audio_score_follower.core.mic_effects_probe import probe_capture_effects
@@ -97,6 +103,13 @@ _PANEL_POLL_MS = 200
 
 class AudioScoreFollowerApp:
     """Top-level orchestrator."""
+
+    # Video of the loaded playback movement (None = a tracked movement)
+    # and the monotonic time its start press played it (None = waiting).
+    _playback_video: str | None = None
+    _playback_started_at: float | None = None
+    # Recording played along with it (file-input mode + play-audio only).
+    _playback_audio: AudioPlayer | None = None
 
     def __init__(
         self,
@@ -203,11 +216,14 @@ class AudioScoreFollowerApp:
         # to decide between exiting and re-opening the launcher.
         self.return_to_launcher_requested = False
 
-        # Scene videos of every video movement, probed once at startup.
-        videos = [
-            t["video"] for m in self.config.movements if is_video_movement(m)
-            for t in m["triggers"]
-        ]
+        # Every video the config plays (playback movements and scene
+        # triggers), probed once at startup.
+        videos = []
+        for m in self.config.movements:
+            if is_playback_movement(m):
+                videos.append(m["video"])
+            elif is_video_movement(m):
+                videos.extend(t["video"] for t in m["triggers"])
         # Each slides movement shows its own deck (movements[].slide_url)
         # or the --slide-url default; all are preloaded so N swaps instantly.
         try:
@@ -446,6 +462,8 @@ class AudioScoreFollowerApp:
 
     def _cleanup(self) -> None:
         logger.info("Shutting down …")
+        if self._playback_audio is not None:
+            self._playback_audio.stop()
         self._workers_stop.set()
         if self.worker is not None:
             self.worker.stop()
@@ -511,16 +529,22 @@ class AudioScoreFollowerApp:
             logger.warning("Prev-movement load failed; reverting to movement %d", old_idx + 1)
             self.config.current_movement_idx = old_idx
             return
-        self.slide_controller.reset_to_first()
+        self._reset_screen_after_reload()
 
     def _stop_worker(self) -> None:
-        """Stop and drop the current OLTW worker (if any)."""
+        """Stop and drop the current OLTW worker (if any), and a playback
+        movement's recording — whatever the outgoing movement plays."""
+        if self._playback_audio is not None:
+            self._playback_audio.stop()
+            self._playback_audio = None
         if self.worker is not None:
             logger.info("Stopping previous OLTW worker …")
             self.worker.stop()
             self.worker = None
 
     def _load_movement(self, movement: dict) -> bool:
+        if is_playback_movement(movement):
+            return self._load_playback_movement(movement)
         # Pure loading / construction lives in movement_loader; app-side
         # orchestration (worker teardown, mic parking, state updates,
         # worker wiring) stays here. stop_previous is invoked from inside
@@ -558,6 +582,7 @@ class AudioScoreFollowerApp:
         self.warp_lookup = loaded.warp_lookup
         self.oltw = loaded.oltw
         onset_enabled = loaded.onset_enabled
+        self._playback_video = None
 
         # A (re)load resumes tracking: clear any prior 「■ 演奏終了」 stop
         # (all modes). set_movement() clears the state-side flag too.
@@ -637,6 +662,95 @@ class AudioScoreFollowerApp:
 
         logger.info("Movement loaded.")
         return True
+
+    def _load_playback_movement(self, movement: dict) -> bool:
+        """A playback movement: no score, follower or worker — the
+        audience screen shows the video's first frame until the start
+        press plays it (``manual_start``). Every input mode waits for the
+        press: there is nothing to follow that could start it.
+
+        In file-input mode with play-audio on, its recording (``input_wav``,
+        or the CLI ``--input-wav`` that overrides every movement) plays
+        along with the silent video; without one the video plays silently.
+        """
+        audio: Path | None = None
+        if self._file_input and self.play_audio:
+            raw = self.input_wav or movement.get("input_wav")
+            audio = Path(raw) if raw else None
+            if audio is not None and not audio.is_file():
+                # Checked before anything stops: like a tracked movement's
+                # missing recording, the current movement keeps running.
+                msg = f"楽章 {movement.get('id')}: 音源ファイルがありません ({audio})"
+                logger.error("%s", msg)
+                self.state.set_load_error(msg)
+                return False
+        self._stop_worker()
+        self.score_mapper = self.warp_lookup = self.oltw = None
+        video = movement["video"]
+        self._playback_video = video
+        self._playback_started_at = None
+        self._performance_ended = False
+
+        self.cooldown.cleanup_old()
+        self.trigger_engine.reset_for_movement()
+        self.result_handler.reset_for_movement()
+        self.state.set_movement(
+            movement_id=movement.get("id"),
+            xml_file=video,
+            triggers=[],
+            movement_number=self.config.current_movement_number(),
+            total_movements=self.config.total_movements(),
+        )
+        self.state.set_waiting_for_start(True)
+        self.state.set_awaiting_first_sound(False)
+        if audio is not None:
+            self._playback_audio = AudioPlayer(
+                audio,
+                on_error=lambda exc: self.state.set_load_error(
+                    f"音源を再生できません（動画は無音で再生）: {audio.name} ({exc})"
+                ),
+            )
+            self._playback_audio.load()
+        self._publish_playback()
+        self.slide_controller.set_mode("video")
+        self.slide_controller.hold_video_start(video)
+        logger.info(
+            "Playback movement loaded (no tracking): %s%s",
+            Path(video).name, f" + audio {audio.name}" if audio else "",
+        )
+        return True
+
+    def _publish_playback(self, paused_at: float | None = None) -> None:
+        self.state.set_playback(
+            duration=self.slide_controller.video_durations.get(self._playback_video),
+            started_at=self._playback_started_at,
+            paused_at=paused_at,
+            audio=self._playback_audio.path.name if self._playback_audio else None,
+        )
+
+    def _start_playback(self) -> None:
+        """Start press on a playback movement: play its video once."""
+        if self._performance_ended:
+            logger.info("start pressed but playback was stopped — press R to restart")
+            return
+        if self._playback_started_at is not None:
+            logger.info("start pressed but the video is already playing (no-op)")
+            return
+        self._playback_started_at = time.monotonic()
+        self.slide_controller.play_video(self._playback_video)
+        if self._playback_audio is not None:
+            self._playback_audio.play()
+        self.state.set_waiting_for_start(False)
+        self._publish_playback()
+        logger.info("Playback started: %s", Path(self._playback_video).name)
+
+    def _reset_screen_after_reload(self) -> None:
+        """R / P reload the movement, which restarts its triggers from
+        measure 1, so the deck goes back to slide 1 too. Not for a
+        playback movement: its load already put the video back on its
+        first frame, and a video-mode reset would black that out."""
+        if self._playback_video is None:
+            self.slide_controller.reset_to_first()
 
     # ---------------------------------------------------- silence gate
     def _check_silence_gate(self) -> None:
@@ -751,9 +865,14 @@ class AudioScoreFollowerApp:
         modes) fall through to the legacy force-lock-in, which arms
         inertia at the conductor's downbeat.
 
+        A playback movement has no follower: the press plays its video.
+
         Public (no leading underscore) so the GUI can wire a button
         click directly to it.
         """
+        if self._playback_video is not None:
+            self._start_playback()
+            return
         if self.oltw is None:
             logger.warning("start pressed but OLTW not initialised yet")
             return
@@ -805,6 +924,9 @@ class AudioScoreFollowerApp:
         if self._performance_ended:
             logger.info("end pressed but performance already ended (no-op)")
             return
+        if self._playback_video is not None:
+            self._pause_playback()
+            return
         if self.worker is None:
             logger.info("end pressed but no follower worker is running (no-op)")
             return
@@ -818,13 +940,30 @@ class AudioScoreFollowerApp:
         self.state.set_next_trigger(None)
         logger.info("Performance ended by operator — follower stopped; press R/N to re-follow")
 
+    def _pause_playback(self) -> None:
+        """End press on a playback movement: stop the video where it is
+        (an emergency stop — the screen keeps that frame). R restarts it."""
+        if self._playback_started_at is None:
+            logger.info("end pressed but the video has not started (no-op)")
+            return
+        self._performance_ended = True
+        self.slide_controller.pause_video()
+        if self._playback_audio is not None:
+            self._playback_audio.stop()
+        self.state.set_performance_ended(True)
+        self._publish_playback(paused_at=time.monotonic())
+        logger.info("Playback paused by operator — press R to restart")
+
     def is_performing(self) -> bool:
         """True while the follower is live on a performance.
 
         Mic mode before 「▶ 演奏開始」, after 「■ 演奏終了」, and with no
         movement loaded all count as not performing. wav/loopback modes
         auto-start, so they are performing from load until 「■ 演奏終了」.
+        A playback movement performs from its start press until 「■ 演奏終了」.
         """
+        if self._playback_video is not None:
+            return self._playback_started_at is not None and not self._performance_ended
         return (
             self.worker is not None
             and self._performance_started
@@ -884,7 +1023,7 @@ class AudioScoreFollowerApp:
             # Reload resets the fired-trigger history, so the deck goes back
             # to slide 1 too (the measure-1 trigger then advances it again).
             if self._load_current_movement():
-                self.slide_controller.reset_to_first()
+                self._reset_screen_after_reload()
 
         def _on_l(_e: tk.Event) -> None:
             self.manual_start()
@@ -892,11 +1031,15 @@ class AudioScoreFollowerApp:
         def _on_e(_e: tk.Event) -> None:
             self.end_performance()
 
+        # A playback movement has no triggers, and a bare key press would
+        # land on the hidden deck: →/← do nothing there.
         def _on_next(_e: tk.Event) -> None:
-            self.trigger_engine.advance_to_next_trigger()
+            if self._playback_video is None:
+                self.trigger_engine.advance_to_next_trigger()
 
         def _on_prev(_e: tk.Event) -> None:
-            self.trigger_engine.back_to_prev_trigger()
+            if self._playback_video is None:
+                self.trigger_engine.back_to_prev_trigger()
 
         def _on_thr_up(_e: tk.Event) -> None:
             self.adjust_silence_threshold(_THRESHOLD_STEP_DB)

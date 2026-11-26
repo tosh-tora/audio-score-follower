@@ -156,3 +156,46 @@ def test_empty_or_non_string_input_wav_is_rejected(tmp_path, bad):
     config_path.write_text(json.dumps(config), encoding="utf-8")
     with pytest.raises(ConfigError, match="input_wav"):
         ConfigLoader(str(config_path))
+
+
+# ------------------------------------------------- 動画再生の楽章（追随なし）
+def _write_playback(tmp_path, **extra):
+    (tmp_path / "movie").mkdir(exist_ok=True)
+    (tmp_path / "movie" / "m3.mp4").write_bytes(b"\x00")
+    movement = {"id": 3, "video": "movie/m3.mp4", **extra}
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"movements": [movement]}), encoding="utf-8")
+    return path
+
+
+def test_playback_movement_needs_no_score_or_build(tmp_path):
+    from audio_score_follower.config.loader import is_playback_movement, is_video_movement
+
+    loader = ConfigLoader(str(_write_playback(tmp_path)))
+    (m,) = loader.movements
+    assert m["video"] == str((tmp_path / "movie" / "m3.mp4").resolve())
+    assert "xml_file" not in m  # 楽譜の自動検出もしない
+    assert is_playback_movement(m) and is_video_movement(m)
+    assert loader.has_video_movements()
+
+
+@pytest.mark.parametrize("key, value", [
+    ("triggers", []), ("slide_url", "https://x"),
+    ("xml_file", "a.mxl"), ("built_dir", "b"),
+])
+def test_playback_movement_rejects_tracking_keys(tmp_path, key, value):
+    with pytest.raises(ConfigError, match=key):
+        ConfigLoader(str(_write_playback(tmp_path, **{key: value})))
+
+
+def test_playback_movement_missing_video_is_rejected(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"movements": [{"id": 3, "video": "none.mp4"}]}), encoding="utf-8")
+    with pytest.raises(ConfigError, match="見つかりません"):
+        ConfigLoader(str(path))
+
+
+def test_playback_movement_may_have_a_recording(tmp_path):
+    # 音源ファイル入力で動画と一緒に流す録音。存在確認は起動時の validate が行う
+    loader = ConfigLoader(str(_write_playback(tmp_path, input_wav="rec/3.mp3")))
+    assert loader.movements[0]["input_wav"] == str((tmp_path / "rec" / "3.mp3").resolve())

@@ -50,8 +50,10 @@ class _FakePage:
         if self.closed:
             raise RuntimeError("Target page has been closed")
         self.calls.append(("eval", js, arg))
-        if "asfPlay" in js or "asfHoldEnd" in js:
+        if "asfPlay" in js or "asfHold" in js:
             return {"error": None, "cut": False}
+        if "asfPause" in js:
+            return 12.5
         return None
 
     def locator(self, _sel: str) -> _FakeLocator:
@@ -198,12 +200,17 @@ def test_reset_clears_the_replayed_presses(fake_pw):
         sc.stop()
 
 
-def test_video_mode_restores_held_frame(fake_pw, tmp_path):
+def _video_evals(page: _FakePage) -> list[tuple]:
+    return [c for c in page.calls if c[0] == "eval" and "asf" in c[1]
+            and ("Play" in c[1] or "Hold" in c[1] or "Black" in c[1])]
+
+
+def test_video_mode_restores_held_last_frame(fake_pw, tmp_path):
     clip = tmp_path / "scene1.mp4"
     sc, reopened = _start(fake_pw)
     try:
         sc.set_mode("video")
-        sc.play_video(str(clip))
+        sc.hold_video_end(str(clip))
         _drain(sc)
 
         fake_pw.pages[0].closed = True
@@ -211,6 +218,55 @@ def test_video_mode_restores_held_frame(fake_pw, tmp_path):
         evals = fake_pw.pages[-1].calls
         assert ("eval", "m => window.asfSetMode(m)", "video") in evals
         assert ("eval", "u => window.asfHoldEnd(u)", clip.resolve().as_uri()) in evals
+    finally:
+        sc.stop()
+
+
+def test_playing_video_resumes_where_it_would_be(fake_pw, tmp_path):
+    # A playing video is resumed at its elapsed time, not from the top
+    # (a 10-minute playback movement must not restart mid-concert). One
+    # that finished meanwhile is clamped to its last frame by the page.
+    clip = tmp_path / "movement3.mp4"
+    sc, reopened = _start(fake_pw)
+    try:
+        sc.set_mode("video")
+        sc.play_video(str(clip))
+        _drain(sc)
+        time.sleep(0.3)
+
+        fake_pw.pages[0].closed = True
+        assert reopened.wait(3.0)
+        last = _video_evals(fake_pw.pages[-1])[-1]
+        assert last[1] == "([u, t]) => window.asfPlay(u, null, t)"
+        uri, offset = last[2]
+        assert uri == clip.resolve().as_uri()
+        assert offset >= 0.3
+    finally:
+        sc.stop()
+
+
+def test_first_frame_and_paused_frame_are_restored(fake_pw, tmp_path):
+    clip = tmp_path / "movement3.mp4"
+    sc, reopened = _start(fake_pw)
+    try:
+        sc.set_mode("video")
+        sc.hold_video_start(str(clip))
+        _drain(sc)
+        fake_pw.pages[0].closed = True
+        assert reopened.wait(3.0)
+        last = _video_evals(fake_pw.pages[-1])[-1]
+        assert last == ("eval", "([u, t]) => window.asfHoldAt(u, t)",
+                        [clip.resolve().as_uri(), 0.0])
+
+        reopened.clear()
+        sc.play_video(str(clip))
+        sc.pause_video()  # the fake page reports 12.5 s
+        _drain(sc)
+        fake_pw.pages[-1].closed = True
+        assert reopened.wait(3.0)
+        last = _video_evals(fake_pw.pages[-1])[-1]
+        assert last == ("eval", "([u, t]) => window.asfHoldAt(u, t)",
+                        [clip.resolve().as_uri(), 12.5])
     finally:
         sc.stop()
 

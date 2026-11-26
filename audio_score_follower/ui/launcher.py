@@ -104,7 +104,10 @@ _HELP = {
         "全デッキを起動時に読み込んでおくので、N で次の楽章へ移るとスライドも即座に切り替わります。"
         "同じURLの楽章どうしは1つのデッキを続けて使います。\n"
         "スライドURLが空欄の楽章はドライラン（スライドを操作しない）。"
-        "動画の楽章はスライドを使いません。（CLI: --slide-url / --input-wav は全楽章共通）"
+        "動画の楽章はスライドを使いません。\n"
+        "動画再生の楽章（追随しない）はスライドURL欄に動画ファイルを指定します。"
+        "音源欄の録音は、音源ファイル入力で「同時に再生する」のとき動画と一緒に流れます"
+        "（空欄なら無音）。（CLI: --slide-url / --input-wav は全楽章共通）"
     ),
     "silence": (
         "マイク音量がこの値(dBFS)以下の間は追随を一時停止します"
@@ -880,13 +883,25 @@ class _LauncherWindow:
             label = ttk.Label(grid, text=_ellipsize(row.label, 16), **small)
             label.grid(row=i, column=0, sticky="w", padx=(0, 6))
             attach_help(row.label, label)
-            url_var = tk.StringVar(value=row.slide_url or "")
+            url_var = tk.StringVar(value=(row.video if row.is_playback else row.slide_url) or "")
             wav_var = tk.StringVar(value=row.input_wav or "")
-            entry_url = ttk.Entry(grid, textvariable=url_var, width=34, **small)
-            entry_url.grid(row=i, column=1, sticky="we", padx=(0, 6))
-            if row.is_video:
-                url_var.set("（動画の楽章）")
-                entry_url.configure(state="disabled")
+            if row.is_playback:
+                # The video takes the deck's column, with its own 参照… in
+                # the same cell (no extra column: the 1280x800 budget).
+                cell = ttk.Frame(grid)
+                cell.grid(row=i, column=1, sticky="we", padx=(0, 6))
+                entry_url = ttk.Entry(cell, textvariable=url_var, width=28, **small)
+                entry_url.pack(side="left", fill="x", expand=True)
+                ttk.Button(
+                    cell, text="参照…", style="Row.TButton",
+                    command=lambda v=url_var: self._on_browse_video(v),
+                ).pack(side="left", fill="y", padx=(6, 0))
+            else:
+                entry_url = ttk.Entry(grid, textvariable=url_var, width=34, **small)
+                entry_url.grid(row=i, column=1, sticky="we", padx=(0, 6))
+                if row.is_video:
+                    url_var.set("（動画の楽章）")
+                    entry_url.configure(state="disabled")
             entry_wav = ttk.Entry(grid, textvariable=wav_var, width=34, **small)
             entry_wav.grid(row=i, column=2, sticky="we")
             button = ttk.Button(
@@ -915,9 +930,22 @@ class _LauncherWindow:
                 slide_url=None if row.is_video else (url_var.get().strip() or None),
                 input_wav=wav_var.get().strip() or None,
                 is_video=row.is_video,
+                is_playback=row.is_playback,
+                video=(url_var.get().strip() or None) if row.is_playback else None,
             )
             for row, (url_var, wav_var) in zip(self._movement_rows, self._movement_vars)
         ]
+
+    def _on_browse_video(self, var: tk.StringVar) -> None:
+        initial = str(Path("data") / "movie")
+        if not Path(initial).exists():
+            initial = "."
+        chosen = filedialog.askopenfilename(
+            parent=self.root, title="動画ファイルを選択", initialdir=initial,
+            filetypes=[("動画ファイル", "*.mp4 *.webm"), ("すべて", "*.*")],
+        )
+        if chosen:
+            var.set(chosen)
 
     def _on_browse_wav(self, var: tk.StringVar) -> None:
         initial = str(Path("data") / "reference_audio")

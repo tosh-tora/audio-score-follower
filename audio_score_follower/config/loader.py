@@ -22,9 +22,24 @@ class ConfigError(ValueError):
     """Raised when config.json has a syntax error or invalid structure."""
 
 
+# Keys a playback movement must not carry: it is not tracked, so a score,
+# build, deck or trigger would be silently ignored — an error says so
+# instead of letting the operator believe they take effect. (input_wav is
+# allowed: in file-input mode it is played along with the silent video.)
+_PLAYBACK_FORBIDDEN = ("triggers", "slide_url", "xml_file", "built_dir")
+
+
+def is_playback_movement(movement: Dict) -> bool:
+    """A movement that only plays one video, untracked (``video`` on the movement)."""
+    return "video" in movement
+
+
 def is_video_movement(movement: Dict) -> bool:
-    """A movement whose triggers play scene videos (validated: all or none)."""
-    return any("video" in t for t in movement.get("triggers", []))
+    """A movement shown on the video layer: a playback movement, or one
+    whose triggers play scene videos (validated: all or none)."""
+    return is_playback_movement(movement) or any(
+        "video" in t for t in movement.get("triggers", [])
+    )
 
 
 class ConfigLoader:
@@ -61,6 +76,10 @@ class ConfigLoader:
               "triggers": [
                 {"measure": 1, "video": "scenes/01_millet.mp4", "note": "ミレー"}
               ]
+            },
+            {
+              "id": 3,
+              "video": "../data/movie/fantastique3.mp4"
             }
           ]
         }
@@ -69,6 +88,12 @@ class ConfigLoader:
     this file, resolved to an absolute path here) instead of pressing a
     key on the deck. A movement is all-video or all-slides; the audience
     screen switches between the two when the movement loads.
+
+    ``video`` on the movement itself makes a playback movement: no
+    tracking at all (no score, build or triggers), just that one video
+    fullscreen — its first frame on load, played on the start press, left
+    on its last frame. Its optional ``input_wav`` is played along with the
+    (silent) video in file-input mode with play-audio on.
 
     ``slide_url`` (optional, slides movements only) gives the movement its
     own deck; without it the movement uses the ``--slide-url`` deck. Every
@@ -136,6 +161,18 @@ class ConfigLoader:
         for mv_idx, movement in enumerate(self.movements):
             mv = f"movements[{mv_idx}]"
 
+            # Existence is checked only when launching in file-input mode
+            # (launch_options.validate): mic mode never opens the file.
+            # A playback movement may have one too: played with its video.
+            if "input_wav" in movement:
+                if not isinstance(movement["input_wav"], str) or not movement["input_wav"].strip():
+                    raise ConfigError(f"{mv}.input_wav: 音源ファイルのパス（文字列）が必要です")
+                movement["input_wav"] = self.resolve_path(movement["input_wav"])
+
+            if is_playback_movement(movement):
+                self._validate_playback(movement, mv)
+                continue
+
             if not movement.get("xml_file"):
                 discovered = self._auto_discover_mxl()
                 if discovered is None:
@@ -169,12 +206,6 @@ class ConfigLoader:
             # Whether the URL is really a Slides deck is checked when the
             # app resolves its decks (audience_panel.resolve_decks), which
             # reports it as a ConfigError before the browser opens.
-            # Existence is checked only when launching in file-input mode
-            # (launch_options.validate): mic mode never opens the file.
-            if "input_wav" in movement:
-                if not isinstance(movement["input_wav"], str) or not movement["input_wav"].strip():
-                    raise ConfigError(f"{mv}.input_wav: 音源ファイルのパス（文字列）が必要です")
-                movement["input_wav"] = self.resolve_path(movement["input_wav"])
 
             if "slide_url" in movement:
                 if not isinstance(movement["slide_url"], str) or not movement["slide_url"].strip():
@@ -220,6 +251,22 @@ class ConfigLoader:
                 trig["action"] = action
 
         logger.debug("Config validation passed (%d movements)", len(self.movements))
+
+    def _validate_playback(self, movement: Dict, mv: str) -> None:
+        """A playback movement: its video (plus id / note / input_wav) only."""
+        extra = [k for k in _PLAYBACK_FORBIDDEN if k in movement]
+        if extra:
+            raise ConfigError(
+                f"{mv}: 動画再生の楽章（'video' 指定）は追随しないため "
+                f"{', '.join(repr(k) for k in extra)} は指定できません"
+            )
+        raw = movement["video"]
+        if not isinstance(raw, str) or not raw.strip():
+            raise ConfigError(f"{mv}.video: 動画ファイルのパス（文字列）が必要です")
+        video = Path(self.resolve_path(raw))
+        if not video.is_file():
+            raise ConfigError(f"{mv}.video: ファイルが見つかりません: {video}")
+        movement["video"] = str(video)
 
     def has_video_movements(self) -> bool:
         """True when any movement plays scene videos instead of the deck."""

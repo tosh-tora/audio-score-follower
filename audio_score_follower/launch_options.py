@@ -176,6 +176,8 @@ def validate(
             f"入力ソースが不正です: {opts.input_source!r} "
             f"(mic / loopback / wav のいずれか)"
         )
+    if opts.config_path is not None and Path(opts.config_path).exists():
+        errors.extend(_missing_movement_videos(Path(opts.config_path), movement_rows))
     if opts.input_source == INPUT_SOURCE_WAV:
         if opts.input_wav is not None:
             if not opts.input_wav.exists():
@@ -195,21 +197,45 @@ def validate(
     return errors
 
 
+def _rows_or_file(
+    config_path: Path, rows: Optional[list["MovementRow"]]
+) -> list["MovementRow"]:
+    if rows is not None:
+        return rows
+    try:
+        return read_movement_rows(config_path)
+    except (ValueError, OSError):
+        return []  # the launcher already shows config read errors
+
+
+def _missing_movement_videos(
+    config_path: Path, rows: Optional[list["MovementRow"]]
+) -> list[str]:
+    """Every playback movement needs its video, in every input mode."""
+    errors = []
+    for row in _rows_or_file(config_path, rows):
+        if not row.is_playback:
+            continue
+        if not row.video:
+            errors.append(f"楽章 {row.label}: 動画ファイルが指定されていません")
+        elif not _resolve_against(config_path, row.video).is_file():
+            errors.append(f"楽章 {row.label}: 動画ファイルが見つかりません: {row.video}")
+    return errors
+
+
 def _missing_movement_wavs(
     config_path: Path, rows: Optional[list["MovementRow"]]
 ) -> list[str]:
     """File-input mode without --input-wav: every movement needs its file.
 
     All movements, not just the first: a gap would only surface at the
-    N press between movements, mid-rehearsal.
+    N press between movements, mid-rehearsal. A playback movement's
+    recording is optional (blank = the video plays silently).
     """
-    if rows is None:
-        try:
-            rows = read_movement_rows(config_path)
-        except (ValueError, OSError):
-            return []  # the launcher already shows config read errors
     errors = []
-    for row in rows:
+    for row in _rows_or_file(config_path, rows):
+        if row.is_playback and not row.input_wav:
+            continue
         if not row.input_wav:
             errors.append(f"楽章 {row.label}: 音源ファイルが指定されていません")
         elif not _resolve_against(config_path, row.input_wav).is_file():
@@ -319,14 +345,18 @@ def read_launcher_settings(config_path: Path) -> dict:
 class MovementRow:
     """One row of the launcher's per-movement table (slide deck + recording).
 
-    Blank values are None. ``is_video``: the movement plays scene videos,
-    so it has no deck.
+    Blank values are None. ``is_video``: the movement is shown on the video
+    layer, so it has no deck. ``is_playback``: it only plays one video,
+    untracked — ``video`` is that file (shown in the slide URL column) and
+    ``input_wav`` the optional recording played along with it.
     """
 
     label: str
     slide_url: Optional[str] = None
     input_wav: Optional[str] = None
     is_video: bool = False
+    is_playback: bool = False
+    video: Optional[str] = None
 
 
 def _resolve_against(config_path: Path, raw: str) -> Path:
@@ -367,6 +397,15 @@ def read_movement_rows(config_path: Path) -> list[MovementRow]:
 
     rows = []
     for i, m in enumerate(movements):
+        if "video" in m:  # playback movement (config.loader.is_playback_movement)
+            rows.append(MovementRow(
+                label=f"{m.get('id', i + 1)}: 動画 {Path(str(m['video'])).stem}",
+                input_wav=_blank_to_none(m.get("input_wav")),
+                is_video=True,
+                is_playback=True,
+                video=_blank_to_none(m.get("video")),
+            ))
+            continue
         triggers = m.get("triggers") if isinstance(m.get("triggers"), list) else []
         is_video = any(isinstance(t, dict) and "video" in t for t in triggers)
         score = Path(str(m["xml_file"])).stem if m.get("xml_file") else "楽譜自動検出"
@@ -410,6 +449,11 @@ def save_launcher_settings(
                 "楽章の数が読み込み時から変わっています。設定ファイルを選び直してください"
             )
         for movement, row in zip(movements, movement_rows):
+            if row.is_playback:
+                # Its video takes the deck's place; a blank one is refused
+                # by validate() before saving, and never erased here.
+                if _blank_to_none(row.video):
+                    movement["video"] = row.video.strip()
             for key, value in (("slide_url", row.slide_url), ("input_wav", row.input_wav)):
                 value = _blank_to_none(value)
                 if value is None or (key == "slide_url" and row.is_video):

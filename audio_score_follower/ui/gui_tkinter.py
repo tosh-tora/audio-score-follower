@@ -107,6 +107,33 @@ def can_return_to_launcher(state: dict) -> bool:
     )
 
 
+def _mmss(sec: float) -> str:
+    sec = max(0, int(sec))
+    return f"{sec // 60}:{sec % 60:02d}"
+
+
+def playback_mode(state: dict, now: float) -> tuple[str, str]:
+    """Mode label text and colour level for a playback movement.
+
+    There is no tracking status to share with the audience screen (it
+    shows only the video), so unlike tracked movements this does not go
+    through ``resolve_status``. ``now`` is ``time.monotonic()``.
+    """
+    pb = state["playback"]
+    duration = pb.get("duration")
+    started = pb.get("started_at")
+    sound = "＋♪音源" if pb.get("audio") else ""
+    if state.get("waiting_for_start") or started is None:
+        return f"🎬 動画再生{sound}（▶ 演奏開始 で再生）", "waiting"
+    elapsed = (pb.get("paused_at") or now) - started
+    if duration is not None and elapsed >= duration:
+        return "🎬 再生終了（最終シーンで静止）", "waiting"
+    total = f" / {_mmss(duration)}" if duration is not None else ""
+    if state.get("performance_ended"):
+        return f"⏸ 一時停止 {_mmss(elapsed)}{total}（R で冒頭へ / N で次の曲）", "checking"
+    return f"🎬 再生中{sound} {_mmss(elapsed)}{total}", "tracking"
+
+
 class FollowerGUI:
     """
     Operator console for Audio Score Follower.
@@ -653,16 +680,21 @@ class FollowerGUI:
         is_locked = state.get('is_locked_in', False)
         waiting_for_start = state.get('waiting_for_start', False)
         performance_ended = state.get('performance_ended', False)
+        playback = state.get('playback') is not None
 
-        conf = state.get('display_confidence', state.get('confidence', 0.0))
-        label, level, self._status_low_since = resolve_status(
-            state,
-            conf_level=confidence_level(float(conf)),
-            now=time.monotonic(),
-            low_since=self._status_low_since,
-        )
+        if playback:
+            text, level = playback_mode(state, time.monotonic())
+        else:
+            conf = state.get('display_confidence', state.get('confidence', 0.0))
+            label, level, self._status_low_since = resolve_status(
+                state,
+                conf_level=confidence_level(float(conf)),
+                now=time.monotonic(),
+                low_since=self._status_low_since,
+            )
+            text = self._mode_text(state, label, level)
         bg, fg = _MODE_COLORS[level]
-        self.label_mode.config(text=self._mode_text(state, label, level), bg=bg, fg=fg)
+        self.label_mode.config(text=text, bg=bg, fg=fg)
 
         # Button visibility (差分時のみ pack/forget — .claude/rules/ui.md):
         #   ended            → neither (re-follow is R / N)
@@ -678,7 +710,8 @@ class FollowerGUI:
             show_start = True
             show_end = False
         else:
-            show_start = not is_locked
+            # A playing video has no lock-in to force: end only.
+            show_start = not is_locked and not playback
             show_end = True
 
         # Both pack to the RIGHT of the mode label; relative order is
@@ -729,15 +762,18 @@ class FollowerGUI:
                     filename = filename.replace("\\", "/").rsplit("/", 1)[-1]
                 self.label_file.config(text=filename, fg="#90a4ae")
 
+            # 動画再生の楽章は追随しないので、小節・拍・確信度・トリガーは --
+            playback = state.get('playback') is not None
+
             # 小節番号（大きな数字）＋ /全小節数
             measure = state['measure']
-            self.label_measure.config(text=str(measure))
+            self.label_measure.config(text="--" if playback else str(measure))
             total = state.get('total_measures', 0)
             self.label_measure_total.config(text=f"/ {total}" if total > 0 else "/ --")
 
             # 拍位置
             beat_in_measure = state.get('beat_in_measure', 1.0)
-            self.label_beat.config(text=f"♩ {int(beat_in_measure)}")
+            self.label_beat.config(text="♩ --" if playback else f"♩ {int(beat_in_measure)}")
 
             # 確信度（色分け）— 表示は絶対コスト由来の display_confidence を
             # 使う。OLTW 内部の confidence は band 相対値で、無関係な音でも
@@ -746,7 +782,9 @@ class FollowerGUI:
             # トリガー床の判定用としてそのまま state に残っている。
             conf = state.get('display_confidence', state['confidence'])
             color = _CONFIDENCE_COLORS[confidence_level(float(conf))]
-            self.label_confidence.config(text=f"{int(conf*100)}%", fg=color)
+            self.label_confidence.config(
+                text="--" if playback else f"{int(conf*100)}%", fg=color
+            )
 
             # ずれ検知警告 — 差分時のみ pack/forget（.claude/rules/ui.md）
             mismatched = bool(state.get('is_mismatched'))
@@ -787,7 +825,10 @@ class FollowerGUI:
                 text=f"前: {prev_trig} 小節目" if prev_trig else "前: -- 小節目"
             )
             next_trig = state['next_trigger_measure']
-            if next_trig:
+            if playback:
+                self.label_prev_trigger.config(text="前: --")
+                self.label_next_trigger.config(text="次: --（動画再生）")
+            elif next_trig:
                 self.label_next_trigger.config(text=f"次: {next_trig} 小節目")
             else:
                 self.label_next_trigger.config(text="次: なし")

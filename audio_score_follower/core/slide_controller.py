@@ -34,7 +34,10 @@ Video movements (config triggers with ``video``) use the same window:
 (the deck underneath is only hidden, keeping its page), ``play_video``
 plays a scene from the top and leaves it on its last frame. Scene videos
 are muted, and each is probed at startup so a file this browser cannot
-decode is reported before the concert, not at its trigger.
+decode is reported before the concert, not at its trigger. A playback
+movement (one untracked video) uses the same layer: ``hold_video_start``
+shows its first frame until the start press, ``play_video`` plays it and
+``pause_video`` stops it where it is.
 
 Recovery when the window is closed (Issue #64)
 -----------------------------------------------
@@ -43,8 +46,9 @@ projector PC; Chromium's beforeunload prompt needs a prior user gesture
 and Playwright auto-dismisses dialogs, so it cannot be relied on). The
 worker therefore watches for a closed page or a dead browser and opens
 the screen again, then restores what the audience saw: the shown deck,
-each deck's position, the slides/video mode, the held video frame and the
-tracking panel. A deck's position is restored by re-sending every key
+each deck's position, the slides/video mode, the video frame on screen (a
+video still playing resumes where it would be by now) and the tracking
+panel. A deck's position is restored by re-sending every key
 pressed on it since its last reset rather than jumping to a slide number:
 the embed viewer counts build steps (animations) as presses too, so only
 the same key sequence lands on the same build state.
@@ -139,6 +143,8 @@ class SlideController:
         self.viewport = viewport
         # Startup probe failures, one human-readable line per bad file.
         self.video_problems: list[str] = []
+        # Startup probe durations (seconds) of the videos that decode.
+        self.video_durations: dict[str, float] = {}
         # Which layer the audience sees; only touched by the worker thread
         # (commands apply in queue order, so reset follows the last mode).
         self._mode = "slides"
@@ -149,8 +155,10 @@ class SlideController:
         self._deck = 0
         # Keys sent to each deck since its last reset (its position).
         self._presses: dict[int, list[str]] = {}
-        # Video whose last frame is (or will end up) on screen; None = black.
-        self._video: Optional[str] = None
+        # What the video layer shows: ("black",), ("end", path) = last
+        # frame, ("at", path, sec) = a still frame, or ("play", path, t0)
+        # = playing since monotonic t0 (as if started from the top).
+        self._shown: tuple = ("black",)
         self._last_view: Optional[dict] = None
 
         self._command_queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
@@ -228,16 +236,26 @@ class SlideController:
         self._command_queue.put(("mode", mode))
 
     def play_video(self, path: str, next_path: Optional[str] = None) -> None:
-        """Queue playing a scene video from the top (fullscreen, muted).
+        """Queue playing a video from the top (fullscreen, muted).
 
         ``next_path`` is preloaded afterwards so the following scene
-        starts without a decode gap.
+        starts without a decode gap. A video left to its end stays on its
+        last frame.
         """
         self._command_queue.put(("play", (path, next_path)))
 
     def hold_video_end(self, path: Optional[str]) -> None:
         """Queue showing a scene's last frame, still. None shows black."""
         self._command_queue.put(("hold", path))
+
+    def hold_video_start(self, path: str) -> None:
+        """Queue showing a video's first frame, still (playback movement
+        waiting for its start press)."""
+        self._command_queue.put(("hold_start", path))
+
+    def pause_video(self) -> None:
+        """Queue stopping the shown video where it is."""
+        self._command_queue.put(("pause", None))
 
     def stop(self, timeout: float = 5.0) -> None:
         """Signal worker to close the browser and exit."""
@@ -385,14 +403,29 @@ class SlideController:
         page.evaluate("i => window.asfShowDeck(i)", self._deck)
         page.evaluate("m => window.asfSetMode(m)", self._mode)
         if self._mode == "video":
-            if self._video is None:
-                page.evaluate("() => window.asfBlack()")
-            else:
-                page.evaluate("u => window.asfHoldEnd(u)", _video_uri(self._video))
+            self._restore_video(page)
         else:
             _focus_slides(page)
         if self._last_view is not None:
             page.evaluate("v => window.asfUpdate(v)", self._last_view)
+
+    def _restore_video(self, page) -> None:
+        kind, *rest = self._shown
+        if kind == "black":
+            page.evaluate("() => window.asfBlack()")
+        elif kind == "end":
+            page.evaluate("u => window.asfHoldEnd(u)", _video_uri(rest[0]))
+        elif kind == "at":
+            page.evaluate("([u, t]) => window.asfHoldAt(u, t)", [_video_uri(rest[0]), rest[1]])
+        else:
+            # Still playing (or finished while the window was closed — the
+            # page then shows the last frame): carry on from where the
+            # audience would be by now, not from the top.
+            path, t0 = rest
+            page.evaluate(
+                "([u, t]) => window.asfPlay(u, null, t)",
+                [_video_uri(path), time.monotonic() - t0],
+            )
 
     def _apply(self, page, op: str, arg) -> None:
         """Apply one queued command. The state it leads to is recorded
@@ -413,7 +446,7 @@ class SlideController:
                 page.evaluate("v => window.asfUpdate(v)", view)
         elif op == "reset":
             if self._mode == "video":
-                self._video = None
+                self._shown = ("black",)
                 page.evaluate("() => window.asfBlack()")
                 logger.info("Video reset to black")
             else:
@@ -431,16 +464,14 @@ class SlideController:
             self._mode = arg
             page.evaluate("m => window.asfSetMode(m)", arg)
             if arg == "video":
-                self._video = None
+                self._shown = ("black",)
                 page.evaluate("() => window.asfBlack()")
             else:
                 _focus_slides(page)
             logger.info("Audience screen mode: %s", arg)
         elif op == "play":
             path, next_path = arg
-            # A scene stays on its last frame once it ends, so that frame
-            # is what a reopened screen shows.
-            self._video = path
+            self._shown = ("play", path, time.monotonic())
             res = page.evaluate(
                 "([u, n]) => window.asfPlay(u, n)",
                 [_video_uri(path), _video_uri(next_path) if next_path else None],
@@ -458,7 +489,7 @@ class SlideController:
                     Path(path).name,
                 )
         elif op == "hold":
-            self._video = arg
+            self._shown = ("black",) if arg is None else ("end", arg)
             if arg is None:
                 page.evaluate("() => window.asfBlack()")
                 logger.info("Video held on black")
@@ -469,6 +500,18 @@ class SlideController:
                                  arg, res["error"])
                 else:
                     logger.info("Holding last frame of: %s", Path(arg).name)
+        elif op == "hold_start":
+            self._shown = ("at", arg, 0.0)
+            res = page.evaluate("([u, t]) => window.asfHoldAt(u, t)", [_video_uri(arg), 0.0])
+            if res["error"]:
+                logger.error("動画の冒頭を表示できません: %s (%s)", arg, res["error"])
+            else:
+                logger.info("Holding first frame of: %s", Path(arg).name)
+        elif op == "pause":
+            pos = page.evaluate("() => window.asfPause()")
+            if pos is not None and self._shown[0] in ("play", "at"):
+                self._shown = ("at", self._shown[1], pos)
+                logger.info("Video paused at %.1fs", pos)
         else:
             logger.warning("Unknown slide controller command: %s", op)
 
@@ -477,6 +520,7 @@ class SlideController:
         for path in self.videos:
             res = page.evaluate("u => window.asfProbe(u)", _video_uri(path))
             if res["ok"]:
+                self.video_durations[path] = res["duration"]
                 logger.info("Video OK: %s (%.1fs)", Path(path).name, res["duration"])
             else:
                 self.video_problems.append(f"{Path(path).name}: {res['error']}")
@@ -623,7 +667,14 @@ class NullSlideController:
     def hold_video_end(self, path: Optional[str]) -> None:  # noqa: ARG002
         return None
 
+    def hold_video_start(self, path: str) -> None:  # noqa: ARG002
+        return None
+
+    def pause_video(self) -> None:
+        return None
+
     video_problems: tuple = ()
+    video_durations: dict = {}
 
     def press(self, action: str) -> None:
         # No log here — the canonical "slide press" log is emitted by
