@@ -44,6 +44,7 @@ LOST_CONFIDENCE_SEC = 3.0
 
 @dataclass(frozen=True)
 class PanelView:
+    movement: str
     measure: str
     beat: str
     confidence: str
@@ -149,6 +150,9 @@ def build_panel_view(
     manual = adjusted_at is not None and 0.0 <= now - adjusted_at < MANUAL_FLASH_SEC
 
     return PanelView(
+        # Not blanked while idle: which movement is about to start (or
+        # just ended) is already known, unlike the measure and beat.
+        movement=str(state.get("movement_number", 1)),
         measure="--" if idle else str(state.get("measure", "")),
         beat="--" if idle else str(int(state.get("beat_in_measure", 1.0))),
         confidence=conf_text,
