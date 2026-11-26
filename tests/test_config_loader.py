@@ -158,6 +158,27 @@ def test_empty_or_non_string_input_wav_is_rejected(tmp_path, bad):
         ConfigLoader(str(config_path))
 
 
+# ---- movements[].theme_color（聴衆パネルのテーマ色）
+
+def _with_theme(tmp_path, color):
+    config_path = _write_config(tmp_path, [{"measure": 1}])
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["movements"][0]["theme_color"] = color
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    return config_path
+
+
+def test_theme_color_is_accepted(tmp_path):
+    loader = ConfigLoader(str(_with_theme(tmp_path, "#5a0A14")))
+    assert loader.movements[0]["theme_color"] == "#5a0A14"
+
+
+@pytest.mark.parametrize("bad", ["red", "#FFF", "5A0A14", "#5A0A14 ", "#GG0000", 0x5A0A14, None])
+def test_malformed_theme_color_is_rejected(tmp_path, bad):
+    with pytest.raises(ConfigError, match="theme_color"):
+        ConfigLoader(str(_with_theme(tmp_path, bad)))
+
+
 # ------------------------------------------------- 動画再生の楽章（追随なし）
 def _write_playback(tmp_path, **extra):
     (tmp_path / "movie").mkdir(exist_ok=True)

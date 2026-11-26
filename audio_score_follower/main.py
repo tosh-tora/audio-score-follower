@@ -614,6 +614,7 @@ class AudioScoreFollowerApp:
             movement_number=self.config.current_movement_number(),
             total_movements=self.config.total_movements(),
             total_measures=loaded.total_measures,
+            theme_color=movement.get("theme_color"),
         )
         if triggers:
             self.state.set_next_trigger(min(t["measure"] for t in triggers))
@@ -700,6 +701,7 @@ class AudioScoreFollowerApp:
             triggers=[],
             movement_number=self.config.current_movement_number(),
             total_movements=self.config.total_movements(),
+            theme_color=movement.get("theme_color"),
         )
         self.state.set_waiting_for_start(True)
         self.state.set_awaiting_first_sound(False)
