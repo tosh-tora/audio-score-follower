@@ -89,6 +89,8 @@
 <div id="wrap">
   <div id="decks"></div>
   <div id="panel">
+    <div class="label">楽章</div>
+    <div class="mid" id="movement">--</div>
     <div class="label">小節</div>
     <div class="big" id="measure">--</div>
     <div class="label">拍</div>
@@ -214,6 +216,7 @@
   };
 
   window.asfUpdate = (v) => {
+    document.getElementById("movement").textContent = v.movement;
     document.getElementById("measure").textContent = v.measure;
     document.getElementById("beat").textContent = v.beat;
     const conf = document.getElementById("confidence");

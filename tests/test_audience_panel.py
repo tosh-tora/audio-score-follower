@@ -60,6 +60,17 @@ def test_measure_and_beat():
     assert (v.measure, v.beat) == ("17", "2")
 
 
+def test_movement_number():
+    v = build_panel_view(_tracking(movement_number=2), now=0.0)
+    assert v.to_js()["movement"] == "2"
+
+
+def test_waiting_still_shows_movement():
+    # どの楽章を待っているかは待機中も確定している（小節・拍とは違う）
+    v = build_panel_view(_tracking(waiting_for_start=True, movement_number=3), now=0.0)
+    assert (v.movement, v.measure) == ("3", "--")
+
+
 # ---------------------------------------------------------------- 確信度
 @pytest.mark.parametrize("conf, level", [
     (0.61, "good"), (0.6, "mid"), (0.41, "mid"), (0.4, "low"), (0.0, "low"),
