@@ -26,6 +26,15 @@
   .deck.active { visibility: visible; }
   #panel { flex: 1; position: relative; display: flex; flex-direction: column;
     justify-content: center; align-items: center; gap: 1.5vh; text-align: center; }
+  /* Movement theme colour (v.theme): ONLY a frame around the panel and the
+     band behind the movement number. Legibility comes first, so the text
+     colours, the black background and the status colours (confidence,
+     status badge, Berlioz's disc) are never tinted — a theme must not
+     compete with them. The band's label colour is v.theme_text, chosen
+     in Python for contrast (audience_panel.theme_text_color). */
+  #panel.themed { box-shadow: inset 0 0 0 1.2vh var(--theme); }
+  #movement.themed { background: var(--theme); color: var(--theme-text);
+    min-width: 12vh; padding: 0.4vh 2vw; border-radius: 1.2vh; }
   .label { font-size: 2.6vh; color: #aaa; }
   .big { font-size: 11vh; font-weight: bold; line-height: 1.05; }
   .mid { font-size: 7vh; font-weight: bold; line-height: 1.05; }
@@ -217,6 +226,13 @@
 
   window.asfUpdate = (v) => {
     document.getElementById("movement").textContent = v.movement;
+    const panel = document.getElementById("panel");
+    if (v.theme) {
+      panel.style.setProperty("--theme", v.theme);
+      panel.style.setProperty("--theme-text", v.theme_text);
+    }
+    panel.classList.toggle("themed", !!v.theme);
+    document.getElementById("movement").classList.toggle("themed", !!v.theme);
     document.getElementById("measure").textContent = v.measure;
     document.getElementById("beat").textContent = v.beat;
     const conf = document.getElementById("confidence");

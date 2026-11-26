@@ -45,6 +45,7 @@ class AppState:
         self.current_xml_file: Optional[str] = None
         self.current_triggers: List[dict] = []
         self.current_movement_number: int = 1   # 1-indexed display number
+        self.movement_theme_color: Optional[str] = None  # movements[].theme_color
         self.total_movements: int = 1
         self.total_measures: int = 0            # 0 = unknown (score not loaded)
         # Non-None when the last movement load failed — shown in the GUI so
@@ -161,6 +162,7 @@ class AppState:
                 'movement_id': self.current_movement_id,
                 'xml_file': self.current_xml_file,
                 'movement_number': self.current_movement_number,
+                'movement_theme_color': self.movement_theme_color,
                 'total_movements': self.total_movements,
                 'total_measures': self.total_measures,
                 'load_error': self.load_error,
@@ -253,6 +255,7 @@ class AppState:
         movement_number: int = 1,
         total_movements: int = 1,
         total_measures: int = 0,
+        theme_color: Optional[str] = None,
     ):
         """
         Set current movement context.
@@ -261,12 +264,14 @@ class AppState:
             movement_id: Movement ID from config
             xml_file: Path to MusicXML file
             triggers: List of trigger dicts
+            theme_color: movements[].theme_color ("#RRGGBB"), or None
         """
         with self._lock:
             self.current_movement_id = movement_id
             self.current_xml_file = xml_file
             self.current_triggers = triggers
             self.current_movement_number = movement_number
+            self.movement_theme_color = theme_color
             self.total_movements = total_movements
             self.total_measures = total_measures
             self.load_error = None  # clear any previous error on successful load

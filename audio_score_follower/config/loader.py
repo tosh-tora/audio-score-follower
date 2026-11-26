@@ -10,12 +10,16 @@ the offline-built warping_path + reference_cens artifacts.
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional, List, Dict
 
 logger = logging.getLogger(__name__)
 
 _VALID_ACTIONS = {"right", "left"}
+# movements[].theme_color: only the 6-digit form, so the audience panel can
+# compute the label colour from it (ui/audience_panel.theme_text_color).
+_THEME_COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}")
 
 
 class ConfigError(ValueError):
@@ -168,6 +172,15 @@ class ConfigLoader:
                 if not isinstance(movement["input_wav"], str) or not movement["input_wav"].strip():
                     raise ConfigError(f"{mv}.input_wav: 音源ファイルのパス（文字列）が必要です")
                 movement["input_wav"] = self.resolve_path(movement["input_wav"])
+
+            # Checked before the playback branch: harmless there (the video
+            # covers the panel), so not forbidden.
+            if "theme_color" in movement:
+                color = movement["theme_color"]
+                if not isinstance(color, str) or not _THEME_COLOR_RE.fullmatch(color):
+                    raise ConfigError(
+                        f"{mv}.theme_color: \"#RRGGBB\" 形式の色が必要です (got {color!r})"
+                    )
 
             if is_playback_movement(movement):
                 self._validate_playback(movement, mv)

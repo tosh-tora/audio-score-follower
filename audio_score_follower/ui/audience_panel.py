@@ -52,6 +52,10 @@ class PanelView:
     status: str
     status_level: str  # "tracking" | "checking" | "acquiring" | "lost" | "waiting"
     manual: bool
+    # The movement's theme colour (movements[].theme_color) and the label
+    # colour drawn on it; both None when the movement has none.
+    theme: Optional[str] = None
+    theme_text: Optional[str] = None
     # Not sent to the page: when ``confidence`` was last sampled, and
     # since when it has been in the red band (None = it is not).
     confidence_sampled_at: float = 0.0
@@ -108,6 +112,33 @@ def resolve_status(
     return "追随中", "tracking", None
 
 
+def _luminance(hex_color: str) -> float:
+    """WCAG 2 relative luminance of "#RRGGBB"."""
+    def channel(c: int) -> float:
+        s = c / 255
+        return s / 12.92 if s <= 0.04045 else ((s + 0.055) / 1.055) ** 2.4
+
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+
+
+def contrast_ratio(a: str, b: str) -> float:
+    la, lb = sorted((_luminance(a), _luminance(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def theme_text_color(theme: str) -> str:
+    """Black or white, whichever reads better on ``theme``.
+
+    The movement number sits ON the theme colour, and the themes run from
+    near-white to near-black, so no fixed label colour works for all of
+    them. Picking the higher-contrast of the two guarantees at least 4.5:1
+    (WCAG AA) for any colour — legibility comes first on this screen.
+    """
+    black, white = "#000000", "#FFFFFF"
+    return black if contrast_ratio(theme, black) >= contrast_ratio(theme, white) else white
+
+
 def _confidence(conf: float) -> tuple[str, str]:
     return f"{int(conf * 100)}%", confidence_level(conf)
 
@@ -149,6 +180,8 @@ def build_panel_view(
     adjusted_at = state.get("manual_adjust_at")
     manual = adjusted_at is not None and 0.0 <= now - adjusted_at < MANUAL_FLASH_SEC
 
+    theme = state.get("movement_theme_color")
+
     return PanelView(
         # Not blanked while idle: which movement is about to start (or
         # just ended) is already known, unlike the measure and beat.
@@ -160,6 +193,9 @@ def build_panel_view(
         status=status,
         status_level=status_level,
         manual=manual,
+        # Like the movement number, shown while idle too.
+        theme=theme,
+        theme_text=theme_text_color(theme) if theme else None,
         confidence_sampled_at=sampled_at,
         low_since=low_since,
     )

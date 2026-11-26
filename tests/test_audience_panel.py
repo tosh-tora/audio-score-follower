@@ -7,9 +7,11 @@ from audio_score_follower.ui.audience_panel import (
     HOST_HTML,
     LOST_CONFIDENCE_SEC,
     build_panel_view,
+    contrast_ratio,
     pick_presentation_screen,
     resolve_decks,
     resolve_status,
+    theme_text_color,
     to_embed_url,
 )
 
@@ -69,6 +71,42 @@ def test_waiting_still_shows_movement():
     # どの楽章を待っているかは待機中も確定している（小節・拍とは違う）
     v = build_panel_view(_tracking(waiting_for_start=True, movement_number=3), now=0.0)
     assert (v.movement, v.measure) == ("3", "--")
+
+
+# ---------------------------------------------------------------- テーマ色
+def test_no_theme_by_default():
+    js = build_panel_view(_tracking(), now=0.0).to_js()
+    assert (js["theme"], js["theme_text"]) == (None, None)
+
+
+def test_theme_reaches_the_page_even_while_waiting():
+    v = build_panel_view(
+        _tracking(waiting_for_start=True, movement_theme_color="#7E3FA6"), now=0.0
+    )
+    assert (v.to_js()["theme"], v.to_js()["theme_text"]) == ("#7E3FA6", "#FFFFFF")
+
+
+@pytest.mark.parametrize("theme, text", [
+    ("#F3EEE2", "#000000"),  # 白いドレス
+    ("#F2C230", "#000000"),  # 黄色
+    ("#8FB35E", "#000000"),  # 緑
+    ("#7E3FA6", "#FFFFFF"),  # 紫
+    ("#5A0A14", "#FFFFFF"),  # 魔女（黒に近い赤）
+])
+def test_theme_label_color(theme, text):
+    assert theme_text_color(theme) == text
+
+
+@pytest.mark.parametrize("theme", [f"#{v:02X}{v:02X}{v:02X}" for v in range(0, 256, 5)]
+                         + ["#FF0000", "#00FF00", "#0000FF", "#777777", "#767676"])
+def test_theme_label_always_meets_wcag_aa(theme):
+    # 文字の可視性が最優先: どのテーマ色でも楽章番号は 4.5:1 以上
+    assert contrast_ratio(theme, theme_text_color(theme)) >= 4.5
+
+
+def test_host_html_draws_the_theme():
+    html = HOST_HTML.read_text(encoding="utf-8")
+    assert "v.theme_text" in html and "--theme" in html
 
 
 # ---------------------------------------------------------------- 確信度

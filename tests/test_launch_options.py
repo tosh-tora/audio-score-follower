@@ -590,6 +590,16 @@ class TestMovementRows:
         # 保存後に読み直すと同じ表になる（旧キーからの再移行が起きない）
         assert read_movement_rows(path) == rows
 
+    def test_save_keeps_theme_color(self, tmp_path):
+        # 楽章表に無いキー（テーマ色）は保存で消えない
+        path = _multi_config(tmp_path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["movements"][0]["theme_color"] = "#5A0A14"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        save_launcher_settings(path, _mic_opts(path), movement_rows=read_movement_rows(path))
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        assert saved["movements"][0]["theme_color"] == "#5A0A14"
+
     def test_save_refuses_rows_that_no_longer_match(self, tmp_path):
         path = _multi_config(tmp_path)
         rows = read_movement_rows(path)[:2]
